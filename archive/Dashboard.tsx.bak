@@ -1,0 +1,163 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
+import { fetchTasks, type TaskRow } from "./api";
+
+/** Minimal checklist fetch (unchanged) */
+type ChecklistRow = { id: number; name: string; category?: string; items?: number };
+async function fetchChecklists(): Promise<ChecklistRow[]> {
+  const res = await fetch("http://127.0.0.1:8001/api/checklists");
+  if (!res.ok) throw new Error(await res.text());
+  return (await res.json()) as ChecklistRow[];
+}
+
+/** local coin helper preserved */
+function getCoins(): number {
+  return Number(localStorage.getItem("coins") || "0");
+}
+
+export default function Dashboard() {
+  const [coins, setCoins] = useState<number>(getCoins());
+  const [tasks, setTasks] = useState<TaskRow[] | null>(null);
+  const [checklists, setChecklists] = useState<ChecklistRow[] | null>(null);
+  const [status, setStatus] = useState<string>("");
+
+  async function reload() {
+    setStatus("Loading…");
+    try {
+      const [t, c] = await Promise.allSettled([
+        fetchTasks({ sort: "priority" as any }),
+        fetchChecklists(),
+      ]);
+      if (t.status === "fulfilled") setTasks(t.value); else { console.error(t.reason); setTasks([]); }
+      if (c.status === "fulfilled") setChecklists(c.value); else { console.error(c.reason); setChecklists([]); }
+      setCoins(getCoins());
+      setStatus("Ready");
+    } catch (e:any) {
+      setStatus(`Error: ${e?.message || e}`);
+    }
+  }
+
+  useEffect(() => { reload(); }, []);
+
+  const topTasks = useMemo(() => (Array.isArray(tasks) ? tasks.slice(0, 5) : []), [tasks]);
+  const topChecklists = useMemo(() => (Array.isArray(checklists) ? checklists.slice(0, 5) : []), [checklists]);
+
+  const openCount = useMemo(() => (Array.isArray(tasks) ? tasks.length : 0), [tasks]);
+
+  return (
+    <div className="container main">
+      {/* KPI Row (replace XP/coins focus with more useful counts) */}
+      <div className="grid cols-3">
+        <div className="card kpi">
+          <div className="label">Open Tasks</div>
+          <div className="value">{openCount}</div>
+          <div className="label muted">Visible in list</div>
+        </div>
+        <div className="card kpi">
+          <div className="label">Streak</div>
+          <div className="value">0 days</div>
+          <div className="label muted">Best 0</div>
+        </div>
+        <div className="card kpi">
+          <div className="label">Coins</div>
+          <div className="value">{coins}</div>
+          <div className="label muted">Temporary</div>
+        </div>
+      </div>
+
+      <div style={{ height: 12 }} />
+
+      {/* Quick actions */}
+      <div className="card">
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <h3 style={{ marginTop: 0, marginBottom: 0 }}>Quick Actions</h3>
+          <span className="badge">{status}</span>
+          <div style={{ marginLeft: "auto" }}>
+            <button className="btn" onClick={reload}>Refresh</button>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+          <Link className="btn primary" to="/tasks">Go to Tasks</Link>
+          <Link className="btn" to="/checklists">Go to Checklists</Link>
+          <Link className="btn" to="/journal">Open Journal</Link>
+          <Link className="btn" to="/rewards">Open Rewards</Link>
+        </div>
+      </div>
+
+      <div style={{ height: 12 }} />
+
+      {/* Recent Tasks (cleaned) */}
+      <div className="card">
+        <h3 style={{ marginTop: 0 }}>Recent Tasks</h3>
+        <table className="table">
+          <thead>
+            <tr><th>Title</th><th>Description</th><th>Priority</th><th>Created</th></tr>
+          </thead>
+          <tbody>
+            {topTasks.length === 0 ? (
+              <tr><td colSpan={4}><span className="empty">No tasks yet</span></td></tr>
+            ) : topTasks.map(t => (
+              <tr key={t.task_id}>
+                <td>{t.title}</td>
+                <td style={{ color:"#4b5563" }}>{(t.description && t.description.trim()) || "-"}</td>
+                <td><PriorityPill p={t.priority} /></td>
+                <td>{t.created_at ? timeAgo(t.created_at) : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="muted" style={{ fontSize: 12 }}>
+          Showing top {Math.min(5, topTasks.length)}. View all in <Link to="/tasks">Tasks</Link>.
+        </div>
+      </div>
+
+      <div style={{ height: 12 }} />
+
+      {/* Checklists at a glance (unchanged) */}
+      <div className="card">
+        <h3 style={{ marginTop: 0 }}>Checklists at a Glance</h3>
+        <table className="table">
+          <thead>
+            <tr><th>Name</th><th>Category</th><th>Items</th></tr>
+          </thead>
+          <tbody>
+            {topChecklists.length === 0 ? (
+              <tr><td colSpan={3}><span className="empty">No checklists yet</span></td></tr>
+            ) : topChecklists.map(c => (
+              <tr key={c.id}>
+                <td>{c.name}</td>
+                <td>{c.category || "—"}</td>
+                <td>{typeof c.items === "number" ? c.items : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function timeAgo(iso?: string) {
+  if (!iso) return "—";
+  const t = new Date(iso).getTime();
+  const diff = Date.now() - t;
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
+function PriorityPill({ p }: { p:number }) {
+  const map:{[k:number]:{bg:string;border:string;color:string}} = {
+    1:{ bg:"#ffe8e8", border:"#ffc4c4", color:"#991b1b" },
+    2:{ bg:"#fff1cf", border:"#ffd98a", color:"#92400e" },
+    3:{ bg:"#eef3ff", border:"#cfe0ff", color:"#1e3a8a" },
+    4:{ bg:"#eaf7ef", border:"#c8ecd9", color:"#065f46" },
+    5:{ bg:"#f3f4f6", border:"#e5e7eb", color:"#374151" },
+  };
+  const s = map[p] || map[3];
+  return <span style={{ padding:"4px 8px", borderRadius:999, fontSize:12, background:s.bg, border:`1px solid ${s.border}`, color:s.color }}>P{p}</span>;
+}

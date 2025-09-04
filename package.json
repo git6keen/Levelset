@@ -1,0 +1,39 @@
+{
+    "name": "gamificationproject",
+    "version": "1.0.0",
+    "description": "- One backend entrypoint: `main.py` - One frontend entrypoint: `main.tsx` - Only shallow subfolders: `/scripts`, `/tests` - Anchors/TOC in big files; RUNBOOKs inline - Trace: GET /dev/trace • Health: GET /healthz",
+    "main": "index.js",
+    "directories": {
+        "test": "tests"
+    },
+    "scripts": { "dev":"tsx server.ts","server":"tsx server.ts","build":"tsc","start":"node dist/server.js",
+        "dev:server": "ts-node server.ts",
+        "preview": "vite preview",
+        "build": "vite build",
+        "dev": "vite"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "devDependencies": {
+        "@types/better-sqlite3": "^7.6.13",
+        "@types/cors": "^2.8.19",
+        "@types/express": "^5.0.3",
+        "@types/node": "^24.3.0",
+        "@types/react": "^19.1.10",
+        "@types/react-dom": "^19.1.7",
+        "nodemon": "^3.1.10",
+        "ts-node": "^10.9.2",
+        "tsx": "^4.20.5",
+        "typescript": "^5.9.2",
+        "vite": "^7.1.2"
+    },
+    "dependencies": {
+        "better-sqlite3": "^12.2.0",
+        "cors": "^2.8.5",
+        "express": "^5.1.0",
+        "react": "^19.1.1",
+        "react-dom": "^19.1.1",
+        "react-router-dom": "^7.8.1"
+    }
+}

@@ -1,0 +1,192 @@
+import express from "express";
+import cors from "cors";
+import Database from "better-sqlite3";
+
+const PORT = 8001;
+const DB_PATH = "./app.db";
+
+const db = new Database(DB_PATH);
+db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+/* -------------------- helpers -------------------- */
+function row<T = any>(sql: string, ...args: any[]) { return db.prepare(sql).get(...args) as T; }
+function all<T = any>(sql: string, ...args: any[]) { return db.prepare(sql).all(...args) as T[]; }
+function run(sql: string, ...args: any[]) { return db.prepare(sql).run(...args); }
+
+/* -------------------- health -------------------- */
+app.get("/healthz", (_req, res) => res.json({ ok: true }));
+app.get("/dev/trace", (_req, res) => res.json({ ok: true, note: "stub" }));
+
+/* =================================================
+   TASKS  (aligns with api.ts)
+   ================================================= */
+app.get("/api/tasks", (req, res) => {
+  const { q, priority, sort } = req.query as { q?: string; priority?: string; sort?: "priority" | "title" | "created_at" };
+  const clauses: string[] = [];
+  const params: any[] = [];
+  if (q) { clauses.push("t.title LIKE ?"); params.push(`%${q}%`); }
+  if (priority != null) { clauses.push("t.priority = ?"); params.push(Number(priority)); }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+
+  // We don't have created_at in this minimal schema; map it to id DESC
+  const sortCol = sort === "title" ? "LOWER(t.title)" : (sort === "priority" ? "t.priority" : "t.id");
+  const desc = sort === "title" ? "" : "DESC";
+
+  const rows = all(`
+    SELECT t.id AS task_id, t.title, t.priority, t.xp, t.coins
+    FROM tasks t
+    ${where}
+    ORDER BY ${sortCol} ${desc}, t.id DESC
+  `, ...params);
+
+  res.json(rows);
+});
+
+app.post("/api/tasks", (req, res) => {
+  const { title, description = null, priority = 1, xp = 0, coins = 0 } = req.body || {};
+  if (!title || String(title).trim() === "") return res.status(400).json({ error: "Title required" });
+  run("INSERT INTO tasks(title, description, priority, xp, coins, completed) VALUES (?,?,?,?,?,0)",
+    String(title).trim(), description, Number(priority), Number(xp), Number(coins));
+  res.status(204).end(); // api.ts expects void
+});
+
+app.patch("/api/tasks/:id", (req, res) => {
+  const id = Number(req.params.id);
+  const { title, description = null, priority, xp, coins } = req.body || {};
+  const cur = row("SELECT id FROM tasks WHERE id=?", id);
+  if (!cur) return res.status(404).json({ error: "Not found" });
+  run(`UPDATE tasks SET
+        title = COALESCE(?, title),
+        description = COALESCE(?, description),
+        priority = COALESCE(?, priority),
+        xp = COALESCE(?, xp),
+        coins = COALESCE(?, coins)
+      WHERE id=?`,
+      title ?? null, description, priority ?? null, xp ?? null, coins ?? null, id);
+  res.status(204).end(); // api.ts expects void
+});
+
+app.delete("/api/tasks/:id", (req, res) => {
+  const id = Number(req.params.id);
+  run("DELETE FROM tasks WHERE id=?", id);
+  res.json({ ok: true });
+});
+
+app.post("/api/tasks/:id/complete", (req, res) => {
+  const id = Number(req.params.id);
+  const cur = row("SELECT id FROM tasks WHERE id=?", id);
+  if (!cur) return res.status(404).json({ error: "Not found" });
+  run("UPDATE tasks SET completed=1 WHERE id=?", id);
+  // api.ts expects: { ok, completion_id, earned_id? } — we’ll return a minimal shape
+  res.json({ ok: true, completion_id: Date.now() });
+});
+
+/* =================================================
+   CHECKLISTS  (aligns with api.ts & ChecklistsPage)
+   ================================================= */
+app.get("/api/checklists", (req, res) => {
+  const { q, category, sort } = req.query as { q?: string; category?: string; sort?: "name" | "created_at" };
+  const clauses: string[] = [];
+  const params: any[] = [];
+  if (q) { clauses.push("c.name LIKE ?"); params.push(`%${q}%`); }
+  if (category) { clauses.push("c.category = ?"); params.push(category); }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const order = sort === "name" ? "LOWER(c.name) ASC" : "c.id DESC";
+  const rows = all(`
+    SELECT c.id, c.name, c.category,
+      COALESCE((SELECT COUNT(*) FROM checklist_items i WHERE i.checklist_id=c.id),0) AS items
+    FROM checklists c
+    ${where}
+    ORDER BY ${order}, c.id DESC
+  `, ...params);
+  res.json(rows);
+});
+
+app.post("/api/checklists", (req, res) => {
+  const { name, category = null } = req.body || {};
+  if (!name || String(name).trim() === "") return res.status(400).json({ error: "Name required" });
+  run("INSERT INTO checklists(name, category) VALUES(?,?)", String(name).trim(), category);
+  res.status(204).end(); // api.ts expects void
+});
+
+/* items */
+app.get("/api/checklists/:id/items", (req, res) => {
+  const id = Number(req.params.id);
+  const rows = all(`
+    SELECT id, ? AS checklist_id, text, completed AS done, COALESCE(position, id) AS position
+    FROM checklist_items
+    WHERE checklist_id=?
+    ORDER BY COALESCE(position,id) ASC, id ASC
+  `, id, id);
+  res.json(rows);
+});
+
+app.post("/api/checklists/:id/items", (req, res) => {
+  const id = Number(req.params.id);
+  const { text } = req.body || {};
+  if (!text || String(text).trim() === "") return res.status(400).json({ error: "Text required" });
+  const maxPos = row<{ max: number }>("SELECT COALESCE(MAX(position),0) AS max FROM checklist_items WHERE checklist_id=?", id)?.max ?? 0;
+  run("INSERT INTO checklist_items(checklist_id, text, completed, position) VALUES (?,?,0,?)", id, String(text).trim(), maxPos + 1);
+  res.status(204).end(); // api.ts expects void
+});
+
+app.patch("/api/checklists/:id/items/:itemId/toggle", (req, res) => {
+  const id = Number(req.params.id);
+  const itemId = Number(req.params.itemId);
+  const cur = row("SELECT completed FROM checklist_items WHERE id=? AND checklist_id=?", itemId, id) as { completed?: 0|1 } | undefined;
+  if (!cur) return res.status(404).json({ error: "Not found" });
+  const next = cur.completed === 1 ? 0 : 1;
+  run("UPDATE checklist_items SET completed=? WHERE id=? AND checklist_id=?", next, itemId, id);
+  res.json({ ok: true, done: next }); // matches api.ts return
+});
+
+app.delete("/api/checklists/:id/items/:itemId", (req, res) => {
+  const id = Number(req.params.id);
+  const itemId = Number(req.params.itemId);
+  run("DELETE FROM checklist_items WHERE id=? AND checklist_id=?", itemId, id);
+  res.json({ ok: true });
+});
+
+app.patch("/api/checklists/:id/items/reorder", (req, res) => {
+  const id = Number(req.params.id);
+  const { order } = req.body as { order: number[] };
+  if (!Array.isArray(order)) return res.status(400).json({ error: "order array required" });
+  const upd = db.prepare("UPDATE checklist_items SET position=? WHERE id=? AND checklist_id=?");
+  const tx = db.transaction((ids: number[]) => {
+    ids.forEach((itemId, idx) => upd.run(idx + 1, itemId, id));
+  });
+  tx(order);
+  res.json({ ok: true });
+});
+
+/* print (plaintext) */
+app.get("/api/checklists/:id/print", (req, res) => {
+  const id = Number(req.params.id);
+  const list = row<{ id: number; name: string }>("SELECT id, name FROM checklists WHERE id=?", id);
+  if (!list) return res.status(404).send("Not found");
+  const items = all<{ text: string; done: 0|1 }>(
+    "SELECT text, completed AS done FROM checklist_items WHERE checklist_id=? ORDER BY COALESCE(position,id), id", id
+  );
+  const lines = [
+    `Checklist: ${list.name}`,
+    `Generated: ${new Date().toISOString()}`,
+    "",
+    ...items.map((it, i) => `[${it.done ? "x" : " "}] ${i + 1}. ${it.text}`)
+  ];
+  const txt = lines.join("\n");
+  try {
+    const fs = require("fs");
+    fs.writeFileSync("last_print.txt", txt, "utf-8");
+  } catch {}
+  res.type("text/plain").send(txt);
+});
+
+/* -------------------- start -------------------- */
+app.listen(PORT, () => {
+  console.log(`API listening on http://127.0.0.1:${PORT}`);
+});

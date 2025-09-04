@@ -1,0 +1,121 @@
+﻿import React, { useEffect, useMemo, useState } from "react";
+import { createTask, fetchTasks, TaskRow } from "./api";
+
+export default function TasksPage() {
+  const [q, setQ] = useState("");
+  const [prio, setPrio] = useState<string>("all");
+  const [sortBy, setSortBy] = useState<"priority"|"xp"|"coins"|"title">("priority");
+
+  const [title, setTitle] = useState("");
+  const [newPrio, setNewPrio] = useState("3");
+  const [newXp, setNewXp] = useState("");
+  const [newCoins, setNewCoins] = useState("");
+
+  const [rows, setRows] = useState<TaskRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState<string>("");
+
+  async function reload() {
+    setLoading(true);
+    setStatus("Loading tasks…");
+    try {
+      const list = await fetchTasks({
+        q: q || undefined,
+        priority: prio === "all" ? undefined : Number(prio),
+        sort: sortBy
+      });
+      setRows(list);
+      setStatus(`Loaded ${list.length} task(s).`);
+    } catch (e:any) {
+      console.error(e);
+      setStatus(`Error: ${e.message || e}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(()=>{ reload(); /* first load */ }, []);
+  useEffect(()=>{ const t = setTimeout(reload, 250); return ()=>clearTimeout(t); }, [q, prio, sortBy]);
+
+  const highPrioCount = useMemo(() => rows.filter(t => t.priority <= 2).length, [rows]);
+  const totalXP = useMemo(() => rows.reduce((s,t)=>s+t.xp,0), [rows]);
+
+  async function onAdd() {
+    if (!title.trim()) { setStatus("Title required"); return; }
+    setStatus("Creating…");
+    try {
+      await createTask({ title, priority: Number(newPrio), xp: Number(newXp||0), coins: Number(newCoins||0) });
+      setTitle(""); setNewXp(""); setNewCoins(""); setNewPrio("3");
+      await reload();
+      setStatus("Task created");
+    } catch (e:any) {
+      setStatus(`Error: ${e.message || e}`);
+    }
+  }
+
+  return (
+    <div className="container main">
+      <div className="card">
+        <h3 style={{marginTop:0}}>Tasks</h3>
+
+        {/* Toolbar */}
+        <div className="toolbar" style={{marginBottom:12}}>
+          <input className="input" placeholder="Search tasks…" value={q} onChange={(e)=>setQ(e.target.value)} style={{minWidth:220}} />
+          <select className="select" value={prio} onChange={(e)=>setPrio(e.target.value)} style={{width:160}}>
+            <option value="all">All priorities</option>
+            <option value="1">Priority 1</option><option value="2">Priority 2</option>
+            <option value="3">Priority 3</option><option value="4">Priority 4</option><option value="5">Priority 5</option>
+          </select>
+          <select className="select" value={sortBy} onChange={(e)=>setSortBy(e.target.value as any)} style={{width:160}}>
+            <option value="priority">Sort: Priority</option>
+            <option value="xp">Sort: XP</option>
+            <option value="coins">Sort: Coins</option>
+            <option value="title">Sort: Title</option>
+          </select>
+
+          <div style={{marginLeft:"auto", display:"flex", gap:8, alignItems:"center"}}>
+            <div className="chip"><span className="dot warn"></span> High prio: {highPrioCount}</div>
+            <div className="chip"><span className="dot success"></span> Total XP: {totalXP}</div>
+            <button className="btn" onClick={()=>{ setQ(""); setPrio("all"); setSortBy("priority"); }}>Clear</button>
+          </div>
+        </div>
+
+        {/* Add quick form */}
+        <div style={{display:"grid", gap:12, gridTemplateColumns:"1fr 120px 120px 120px"}}>
+          <input className="input" placeholder="Task title…" value={title} onChange={e=>setTitle(e.target.value)} />
+          <select className="select" value={newPrio} onChange={e=>setNewPrio(e.target.value)}>
+            <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option>
+          </select>
+          <input className="input" placeholder="XP" value={newXp} onChange={e=>setNewXp(e.target.value)} />
+          <input className="input" placeholder="Coins" value={newCoins} onChange={e=>setNewCoins(e.target.value)} />
+        </div>
+        <div style={{marginTop:12, display:"flex", gap:8, alignItems:"center"}}>
+          <button className="btn primary" onClick={onAdd} disabled={loading}>Add Task</button>
+          <span className="badge">{loading ? "Loading…" : status}</span>
+        </div>
+
+        <div className="hr" />
+
+        {/* Table */}
+        <table className="table">
+          <thead>
+            <tr><th>Title</th><th>Priority</th><th>XP</th><th>Coins</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr><td colSpan={5}><span className="empty">No matching tasks</span></td></tr>
+            ) : rows.map(t => (
+              <tr key={t.task_id}>
+                <td>{t.title}</td>
+                <td>P{t.priority}</td>
+                <td>{t.xp}</td>
+                <td>{t.coins}</td>
+                <td>—</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}

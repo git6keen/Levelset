@@ -1,0 +1,433 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+
+/* ===================================================================
+   SettingsPage (Proto3)
+   - Connections status (API, Vite, AI placeholders, Thermal Printer placeholder)
+   - Admin tools (export / backup / vacuum / reindex / clear)
+   - App preferences (dashboard cards visibility, remember search, default category)
+   - Task Categories manager (create / edit / delete / color / icon)
+   - API endpoint override (stored in app.settings.v1 -> aiEndpoint)
+   Notes:
+   • Uses only fetch() to http://127.0.0.1:8001 admin endpoints already in server.ts
+   • Persists to localStorage under "app.settings.v1" and "task.categories.v1"
+=================================================================== */
+
+/* ---------- Local storage helpers ---------- */
+const S_KEY = "app.settings.v1";
+type DashboardPrefs = {
+  showConnections: boolean;
+  showRecent: boolean;
+  showRenown: boolean;
+  showTaskBuckets: boolean;
+};
+type AppSettings = { aiEndpoint?: string;                 // base API for frontend -> backend (api.ts also reads this)
+  lmBase?: string;
+  rememberLastSearch?: boolean;
+  checklistDefaultCategory?: string;
+  dashboard?: DashboardPrefs;  aiPorts?: { lmstudio?: number; ollama?: number; openaiBase?: string };
+};
+function readSettings(): AppSettings {
+  try { return JSON.parse(localStorage.getItem(S_KEY) || "{}"); } catch { return {}; }
+}
+function writeSettings(s: AppSettings) {
+  localStorage.setItem(S_KEY, JSON.stringify(s));
+}
+
+type TaskCategory = { id: string; name: string; color: string; icon?: string };
+const CAT_KEY = "task.categories.v1";
+function readCategories(): TaskCategory[] {
+  try { return JSON.parse(localStorage.getItem(CAT_KEY) || "[]"); } catch { return []; }
+}
+function writeCategories(rows: TaskCategory[]) {
+  localStorage.setItem(CAT_KEY, JSON.stringify(rows));
+}
+
+/* ---------- Small UI helpers ---------- */
+function Dot({ color, title }: { color: string; title?: string }) {
+  return <span className="dot" title={title||""} style={{ display:"inline-block", width:10, height:10, borderRadius:"50%", background:color }} />;
+}
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="card">
+      <h3 style={{ marginTop: 0 }}>{title}</h3>
+      <div style={{ marginTop: 8 }}>{children}</div>
+    </div>
+  );
+}
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ display:"grid", gridTemplateColumns:"1fr 2fr", gap:12, alignItems:"center", padding:"6px 0" }}>
+      <div className="muted" style={{ fontWeight:600 }}>{label}</div>
+      <div>{children}</div>
+    </div>
+  );
+}
+
+/* ---------- Connections probe ---------- */
+type ConnState = "ok" | "warn" | "err" | "unknown";
+type ConnInfo = { name: string; state: ConnState; detail?: string };
+
+export default function SettingsPage() {
+  const [status, setStatus] = useState<string>("");
+
+  // App settings
+  const [settings, setSettings] = useState<AppSettings>(() => {
+    const s = readSettings();
+    return {
+      rememberLastSearch: s.rememberLastSearch ?? true,
+      checklistDefaultCategory: s.checklistDefaultCategory ?? "",
+      aiEndpoint: s.aiEndpoint || "http://127.0.0.1:8001",
+      lmBase: s.lmBase || "http://127.0.0.1:1234",
+            aiPorts: s.aiPorts || { lmstudio: 1234, ollama: 11434 },dashboard: {
+        showConnections: s.dashboard?.showConnections ?? true,
+        showRecent: s.dashboard?.showRecent ?? true,
+        showRenown: s.dashboard?.showRenown ?? true,
+        showTaskBuckets: s.dashboard?.showTaskBuckets ?? true,
+      },
+    };
+  });
+
+  // Task categories
+  const [cats, setCats] = useState<TaskCategory[]>(() => {
+    const rows = readCategories();
+    if (rows.length) return rows;
+    // sensible defaults the first time
+    return [
+      { id: "daily", name: "Daily", color: "#3b82f6", icon: "🗓️" },
+      { id: "fitness", name: "Fitness", color: "#22c55e", icon: "💪" },
+      { id: "food", name: "Food", color: "#f59e0b", icon: "🍲" },
+      { id: "general", name: "General", color: "#6b7280", icon: "📌" },
+    ];
+  });
+
+  useEffect(() => writeCategories(cats), [cats]);
+
+  function saveSettings() {
+    writeSettings(settings);
+    setStatus("Preferences saved.");
+    setTimeout(()=>setStatus(""), 2000);
+  }
+
+  /* ---------- Connections ---------- */
+  const [conns, setConns] = useState<ConnInfo[]>([
+    { name: "API (localhost:8001)", state: "unknown" },
+    { name: "Vite Dev Server", state: "unknown" },
+    { name: "AI Pipeline (placeholder)", state: "unknown", detail: "Coming soon" },
+    { name: "Thermal Printer (placeholder)", state: "unknown", detail: "Coming soon" },
+  ]);
+
+  async function probeAPI(): Promise<ConnInfo> {
+    const base = (settings.aiEndpoint || "http://127.0.0.1:8001").replace(/\/+$/,"");
+    try {
+      const r = await fetch(`${base}/api/admin/health`, { cache:"no-store" });
+      if (!r.ok) return { name:"API (localhost:8001)", state:"err", detail:`HTTP ${r.status}` };
+      const j = await r.json();
+      const wal = j?.db?.wal ? "WAL" : String(j?.db?.journal_mode || "").toUpperCase();
+      return { name:"API (localhost:8001)", state:"ok", detail:`ok — ${wal}, tasks:${j?.counts?.tasks ?? "?"}` };
+    } catch (e:any) {
+      return { name:"API (localhost:8001)", state:"err", detail:String(e?.message||e) };
+    }
+  }
+  async function probeVite(): Promise<ConnInfo> {
+    try {
+      // if UI is rendered, HMR likely active in dev
+      const dev = (import.meta as any)?.env?.DEV;
+      if (dev && (import.meta as any)?.hot) return { name: "Vite Dev Server", state:"ok", detail:"HMR active" };
+      // Fallback probe: HEAD self
+      await fetch(location.origin, { method:"HEAD", cache:"no-store" });
+      return { name:"Vite Dev Server", state:"ok", detail:"reachable" };
+    } catch (e:any) {
+      return { name:"Vite Dev Server", state:"err", detail:String(e?.message||e) };
+    }
+  }
+  async function refreshConnections() {
+    setConns([
+      { name: "API (localhost:8001)", state: "unknown" },
+      { name: "Vite Dev Server", state: "unknown" },
+      { name: "AI Pipeline (placeholder)", state: "unknown", detail: "Coming soon" },
+      { name: "Thermal Printer (placeholder)", state: "unknown", detail: "Coming soon" },
+    ]);
+    const [a, v] = await Promise.allSettled([probeAPI(), probeVite()]);
+    const next: ConnInfo[] = [];
+    next.push(a.status === "fulfilled" ? a.value : { name:"API (localhost:8001)", state:"err", detail:String((a as any).reason) });
+    next.push(v.status === "fulfilled" ? v.value : { name:"Vite Dev Server", state:"err", detail:String((v as any).reason) });
+    next.push({ name:"AI Pipeline (placeholder)", state:"unknown", detail:"Coming soon" });
+    next.push({ name:"Thermal Printer (placeholder)", state:"unknown", detail:"Coming soon" });
+    setConns(next);
+  }
+  useEffect(() => { refreshConnections().catch(()=>{}); /* first mount */ }, []);
+
+  /* ---------- Admin actions ---------- */
+  function openDownload(url: string) {
+    try { window.open(url, "_blank"); } catch { /* noop */ }
+  }
+  const baseURL = useMemo(() => (settings.aiEndpoint || "http://127.0.0.1:8001").replace(/\/+$/,""), [settings.aiEndpoint]);
+
+  async function postJSON(path: string, body?: any) {
+    const r = await fetch(`${baseURL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return await r.json().catch(()=> ({}));
+  }
+
+  // Clear DB form
+  const [clearScope, setClearScope] = useState<"tasks"|"checklists"|"all">("tasks");
+  const [clearMode, setClearMode] = useState<"soft"|"hard">("soft");
+  const [clearConfirm, setClearConfirm] = useState<string>("");
+
+  async function doClear() {
+    try {
+      const payload:any = { scope: clearScope, confirm: clearConfirm };
+      if (clearScope === "tasks") payload.mode = clearMode; // only tasks support soft close
+      const res = await postJSON("/api/admin/clear", payload);
+      setStatus(`Cleared: ${JSON.stringify(res)}`);
+      setClearConfirm("");
+    } catch (e:any) {
+      setStatus(e?.message || "Failed to clear");
+    }
+    setTimeout(()=>setStatus(""), 2500);
+  }
+
+  /* ---------- Category editor ---------- */
+  const [editDraft, setEditDraft] = useState<{ id?: string; name: string; color: string; icon: string }>({ name:"", color:"#3b82f6", icon:"" });
+  const editing = useRef<string | null>(null);
+
+  function addCat() {
+    const id = (editDraft.name || "").toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"") || `cat_${Date.now()}`;
+    if (!editDraft.name.trim()) { setStatus("Name required"); return; }
+    if (cats.some(c => c.id === id)) { setStatus("ID already exists"); return; }
+    const row: TaskCategory = { id, name: editDraft.name.trim(), color: editDraft.color || "#6b7280", icon: (editDraft.icon || "").trim() || undefined };
+    setCats(prev => [...prev, row]);
+    setEditDraft({ name:"", color:"#3b82f6", icon:"" });
+    setStatus("Category added.");
+    setTimeout(()=>setStatus(""), 1500);
+  }
+  function startEdit(c: TaskCategory) {
+    editing.current = c.id;
+    setEditDraft({ id:c.id, name:c.name, color:c.color, icon:c.icon || "" });
+  }
+  function saveEdit() {
+    if (!editing.current) return;
+    const id = editing.current;
+    setCats(prev => prev.map(c => c.id === id ? { id, name: editDraft.name.trim() || c.name, color: editDraft.color || c.color, icon: editDraft.icon?.trim() || undefined } : c));
+    editing.current = null;
+    setEditDraft({ name:"", color:"#3b82f6", icon:"" });
+    setStatus("Saved.");
+    setTimeout(()=>setStatus(""), 1200);
+  }
+  function removeCat(id: string) {
+    setCats(prev => prev.filter(c => c.id !== id));
+  }
+  function moveCat(id: string, dir: -1|1) {
+    const i = cats.findIndex(c => c.id === id);
+    if (i < 0) return;
+    const j = i + dir;
+    if (j < 0 || j >= cats.length) return;
+    const copy = cats.slice();
+    const [row] = copy.splice(i,1);
+    copy.splice(j,0,row);
+    setCats(copy);
+  }
+
+  /* ---------- Render ---------- */
+  return (
+    <div className="container main">
+
+      {/* Connections */}
+      <Section title="Connections">
+        <div className="toolbar" style={{ justifyContent:"space-between", alignItems:"center" }}>
+          <div style={{ display:"grid", gap:8 }}>
+            {conns.map((c, idx) => {
+              const color = c.state==="ok" ? "#10b981" : c.state==="warn" ? "#f59e0b" : c.state==="err" ? "#ef4444" : "#9ca3af";
+              return (
+                <div key={idx} style={{ display:"flex", alignItems:"center", gap:8 }}>
+                  <Dot color={color} />
+                  <div style={{ fontWeight:600 }}>{c.name}</div>
+                  <div className="muted">{c.detail || c.state}</div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="toolbar" style={{ background:"transparent", border:"none", boxShadow:"none" }}>
+            <button className="btn" onClick={refreshConnections}>Recheck</button>
+            <button className="btn" onClick={()=>location.reload()}>Reload App</button>
+          </div>
+        </div>
+      </Section>
+
+      <div className="section-gap" />
+
+      {/* App Preferences */}
+      <Section title="App Preferences">
+        <Row label="API endpoint">
+          <div className="toolbar">
+            <input className="input" value={settings.aiEndpoint || ""} onChange={e=>setSettings({ ...settings, aiEndpoint: e.target.value })} style={{ minWidth: 320 }} />
+            <button className="btn" onClick={saveSettings}>Save</button>
+          </div>
+        </Row>
+        <Row label="LM Studio base (OpenAI API)">
+          <div className="toolbar">
+            <input className="input" value={settings.lmBase || ""} onChange={e=>setSettings({ ...settings, lmBase: e.target.value })} style={{ minWidth: 320 }} />
+            <button className="btn" onClick={saveSettings}>Save</button>
+          </div>
+        </Row>
+<Row label="LM Studio port">
+  <div className="toolbar">
+    <input className="input" type="number" min={1} max={65535}
+      value={settings.aiPorts?.lmstudio ?? 1234}
+      onChange={e=>setSettings({ ...settings, aiPorts: { ...(settings.aiPorts||{}), lmstudio: Number(e.target.value)||1234 } })}
+      style={{ width: 140 }} />
+    <button className="btn" onClick={saveSettings}>Save</button>
+    <span className="muted"> Default: 1234 </span>
+  </div>
+</Row>
+<Row label="Ollama port">
+  <div className="toolbar">
+    <input className="input" type="number" min={1} max={65535}
+      value={settings.aiPorts?.ollama ?? 11434}
+      onChange={e=>setSettings({ ...settings, aiPorts: { ...(settings.aiPorts||{}), ollama: Number(e.target.value)||11434 } })}
+      style={{ width: 140 }} />
+    <button className="btn" onClick={saveSettings}>Save</button>
+    <span className="muted"> Default: 11434 </span>
+  </div>
+</Row>
+<Row label="Remember last search">
+          <label className="toolbar" style={{ gap:8 }}>
+            <input type="checkbox" checked={!!settings.rememberLastSearch} onChange={e=>setSettings({ ...settings, rememberLastSearch: e.target.checked })} />
+            <span>Store last search box contents</span>
+          </label>
+        </Row>
+        <Row label="Default checklist category">
+          <div className="toolbar">
+            <input className="input" placeholder="e.g., Personal" value={settings.checklistDefaultCategory || ""} onChange={e=>setSettings({ ...settings, checklistDefaultCategory: e.target.value })} />
+            <button className="btn" onClick={saveSettings}>Save</button>
+          </div>
+        </Row>
+        <Row label="Dashboard cards">
+          <div className="toolbar" style={{ flexWrap:"wrap" }}>
+            <label><input type="checkbox" checked={!!settings.dashboard?.showConnections} onChange={e=>setSettings(s=>({ ...s, dashboard:{ ...s.dashboard!, showConnections: e.target.checked }}))} /> Show Connections</label>
+            <label><input type="checkbox" checked={!!settings.dashboard?.showRecent} onChange={e=>setSettings(s=>({ ...s, dashboard:{ ...s.dashboard!, showRecent: e.target.checked }}))} /> Show Recent Activity</label>
+            <label><input type="checkbox" checked={!!settings.dashboard?.showRenown} onChange={e=>setSettings(s=>({ ...s, dashboard:{ ...s.dashboard!, showRenown: e.target.checked }}))} /> Show Renown Snapshot</label>
+            <label><input type="checkbox" checked={!!settings.dashboard?.showTaskBuckets} onChange={e=>setSettings(s=>({ ...s, dashboard:{ ...s.dashboard!, showTaskBuckets: e.target.checked }}))} /> Show Task Buckets</label>
+            <button className="btn" onClick={saveSettings} style={{ marginLeft: "auto" }}>Save</button>
+          </div>
+        </Row>
+        <div><span className="badge">{status}</span></div>
+      </Section>
+
+      <div className="section-gap" />
+
+      {/* Task Categories Manager */}
+      <Section title="Task Categories">
+        <div className="toolbar" style={{ flexDirection:"column", alignItems:"stretch" }}>
+          {/* editor */}
+          <div className="toolbar" style={{ gap:8 }}>
+            <input className="input" placeholder="Name (e.g., Fitness)" value={editDraft.name} onChange={e=>setEditDraft({ ...editDraft, name:e.target.value })} style={{ minWidth: 200 }} />
+            <input className="input" type="color" value={editDraft.color} onChange={e=>setEditDraft({ ...editDraft, color:e.target.value })} title="Color" style={{ width: 60, padding: 4 }} />
+            <input className="input" placeholder="Icon (emoji optional)" value={editDraft.icon} onChange={e=>setEditDraft({ ...editDraft, icon:e.target.value })} style={{ width: 160 }} />
+            {editing.current ? (
+              <>
+                <button className="btn primary" onClick={saveEdit}>Save</button>
+                <button className="btn" onClick={()=>{ editing.current=null; setEditDraft({ name:"", color:"#3b82f6", icon:"" }); }}>Cancel</button>
+              </>
+            ) : (
+              <button className="btn primary" onClick={addCat}>Add</button>
+            )}
+          </div>
+          {/* list */}
+          <div className="card" style={{ padding:10 }}>
+            {cats.length === 0 ? (
+              <span className="empty">No categories yet.</span>
+            ) : (
+              <div className="grid" style={{ gap:8 }}>
+                {cats.map((c, i) => (
+                  <div key={c.id} className="toolbar" style={{ justifyContent:"space-between" }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                      <Dot color={c.color} />
+                      <div style={{ fontWeight:700 }}>{c.icon ? `${c.icon} ` : ""}{c.name}</div>
+                      <div className="badge muted">id:{c.id}</div>
+                    </div>
+                    <div className="toolbar" style={{ background:"transparent", border:"none", boxShadow:"none" }}>
+                      <button className="btn" onClick={()=>moveCat(c.id, -1)} disabled={i===0}>↑</button>
+                      <button className="btn" onClick={()=>moveCat(c.id, +1)} disabled={i===cats.length-1}>↓</button>
+                      <button className="btn" onClick={()=>startEdit(c)}>Edit</button>
+                      <button className="btn danger" onClick={()=>removeCat(c.id)}>Delete</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </Section>
+
+      <div className="section-gap" />
+
+      {/* Admin Tools */}
+      <Section title="Admin • Database Tools">
+        <div className="grid" style={{ gridTemplateColumns:"repeat(2, minmax(0,1fr))" }}>
+          {/* Exports */}
+          <div className="card">
+            <h4 style={{ marginTop:0 }}>Exports</h4>
+            <div className="grid" style={{ gap:8 }}>
+              <div className="toolbar">
+                <div style={{ minWidth: 160, fontWeight:600 }}>Tasks</div>
+                <button className="btn" onClick={()=>openDownload(`${baseURL}/api/admin/export/tasks?format=txt`)}>TXT</button>
+                <button className="btn" onClick={()=>openDownload(`${baseURL}/api/admin/export/tasks?format=csv`)}>CSV</button>
+                <button className="btn" onClick={()=>openDownload(`${baseURL}/api/admin/export/tasks?format=json`)}>JSON</button>
+              </div>
+              <div className="toolbar">
+                <div style={{ minWidth: 160, fontWeight:600 }}>Checklists</div>
+                <button className="btn" onClick={()=>openDownload(`${baseURL}/api/admin/export/checklists?format=txt`)}>TXT</button>
+                <button className="btn" onClick={()=>openDownload(`${baseURL}/api/admin/export/checklists?format=csv`)}>CSV</button>
+                <button className="btn" onClick={()=>openDownload(`${baseURL}/api/admin/export/checklists?format=json`)}>JSON</button>
+              </div>
+              <div className="toolbar">
+                <div style={{ minWidth: 160, fontWeight:600 }}>Snapshot</div>
+                <button className="btn" onClick={()=>openDownload(`${baseURL}/api/admin/export/snapshot`)}>JSON</button>
+              </div>
+            </div>
+          </div>
+
+          {/* Maintenance */}
+          <div className="card">
+            <h4 style={{ marginTop:0 }}>Maintenance</h4>
+            <div className="toolbar" style={{ flexWrap:"wrap" }}>
+              <button className="btn" onClick={async()=>{ try{ const j=await postJSON("/api/admin/backup"); setStatus(`Backup ok (${(j?.files||[]).length} files)`);}catch(e:any){setStatus(String(e?.message||e));} setTimeout(()=>setStatus(""),2500); }}>Backup DB</button>
+              <button className="btn" onClick={async()=>{ try{ await postJSON("/api/admin/vacuum"); setStatus("VACUUM ok"); }catch(e:any){ setStatus(String(e?.message||e)); } setTimeout(()=>setStatus(""),2500); }}>VACUUM</button>
+              <button className="btn" onClick={async()=>{ try{ await postJSON("/api/admin/reindex"); setStatus("REINDEX ok"); }catch(e:any){ setStatus(String(e?.message||e)); } setTimeout(()=>setStatus(""),2500); }}>REINDEX</button>
+              <span className="badge">{status}</span>
+            </div>
+            <div className="card" style={{ marginTop:10 }}>
+              <div className="muted" style={{ marginBottom:8 }}>Clear data (Danger zone)</div>
+              <div className="grid" style={{ gap:8 }}>
+                <div className="toolbar">
+                  <label>Scope:&nbsp;
+                    <select className="select" value={clearScope} onChange={e=>setClearScope(e.target.value as any)} style={{ width: 180 }}>
+                      <option value="tasks">Tasks</option>
+                      <option value="checklists">Checklists</option>
+                      <option value="all">All</option>
+                    </select>
+                  </label>
+                  <label>Mode:&nbsp;
+                    <select className="select" value={clearMode} onChange={e=>setClearMode(e.target.value as any)} style={{ width: 160 }} disabled={clearScope!=="tasks"}>
+                      <option value="soft">Soft (mark inactive)</option>
+                      <option value="hard">Hard (delete rows)</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="toolbar">
+                  <input className="input" placeholder='Type exactly: DELETE MY DATA' value={clearConfirm} onChange={e=>setClearConfirm(e.target.value)} />
+                  <button className="btn danger" disabled={clearConfirm!=="DELETE MY DATA"} onClick={doClear}>Confirm Clear</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Section>
+    </div>
+  );
+}

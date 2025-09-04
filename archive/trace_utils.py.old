@@ -1,0 +1,18 @@
+﻿# Prototype 3 — trace_utils.py
+from collections import deque
+from datetime import datetime
+from typing import Any, Deque, Dict
+
+from features import FEATURES
+
+_BUF: Deque[Dict[str, Any]] = deque(maxlen=int(FEATURES.get("trace_buffer_size", 200)))
+
+def log_event(name: str, payload: Dict[str, Any] | None = None) -> None:
+    _BUF.append({
+        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "name": name,
+        "payload": payload or {},
+    })
+
+def get_events_snapshot() -> list[Dict[str, Any]]:
+    return list(_BUF)
