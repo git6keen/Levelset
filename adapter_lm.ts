@@ -1,5 +1,7 @@
 // lmstudioAdapter.ts (drop-in replacement)
 
+import { generateToolRegistry } from "./tools";
+
 const DEFAULT_BASE = "http://127.0.0.1:1234";
 const DEFAULT_MODEL = "lmstudio";
 
@@ -27,11 +29,8 @@ export function buildSystemPrompt(agent: string, context?: string): string {
   const role = (agent || "Assistant").trim();
   const ctx  = (context && context.trim()) ? `\n\n### Context\n${context.trim()}` : "";
 
-  const registry = [
-    `- tasks.create  args: { "title": string, "description"?: string|null, "priority"?: number, "category_id"?: number|null, "xp"?: number, "coins"?: number }`,
-    `- journal.save  args: { "text": string, "mood": number, "energy": number, "stress": number, "tags": string, "ts"?: string }`,
-    `- checklists.addItem  args: { "checklist_id": number, "text": string }`,
-  ].join("\n");
+  // Import tool registry from centralized tools module
+  const registry = generateToolRegistry();
 
   const whenToAct = [
     `Use a tool when the user asks to create/update data (e.g., "make a task", "add to checklist", "save today's journal").`,
