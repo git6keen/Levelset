@@ -1,7 +1,0 @@
-﻿# Prototype 3 — features.py
-# Feature flags with simple metadata
-FEATURES = {
-    "printer_mock_mode": True,   # added_at=init, sunset=when real printer wired
-    "faiss_mock_mode": True,     # added_at=init
-    "trace_buffer_size": 200,    # ring buffer size
-}

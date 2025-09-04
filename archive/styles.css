@@ -1,5 +1,0 @@
-/* --- Compact controls for Chat toolbar & Journal sliders --- */
-.compact-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-.input.auto, select.auto { width:auto !important; }
-.btn.nowrap { white-space: nowrap; }
-.journal-3up { display:grid; grid-template-columns: repeat(3, minmax(100px, 1fr)); gap:12px; }
