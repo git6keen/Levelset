@@ -3,15 +3,15 @@
   "version": "1.0.0",
   "type": "module",
   "description": "Local family gamification system with React frontend and Node.js backend",
-  "main": "server.js",
+  "main": "fastify-server.js",
   "directories": {
     "test": "tests"
   },
   "scripts": {
-    "dev": "tsx server.ts",
-    "server": "tsx server.ts",
+    "dev": "tsx fastify-server.ts",
+    "server": "tsx fastify-server.ts",
     "build": "tsc",
-    "start": "node dist/server.js",
+    "start": "node dist/fastify-server.js",
     "dev:frontend": "vite",
     "build:frontend": "vite build",
     "preview": "vite preview"

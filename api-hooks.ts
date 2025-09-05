@@ -1,4 +1,4 @@
-// FILE: api-hooks.ts - Modern API hooks with Tanstack Query
+// FILE: api-hooks.ts - Complete modern API hooks with Tanstack Query
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from './query-client.js';
 
@@ -127,7 +127,7 @@ export function useUpdateTask() {
   const queryClient = useQueryClient();
   
   return useMutation({
-    mutationFn: async ({ id, updates }: { id: number; updates: Partial<Task> }) => {
+    mutationFn: async ({ id, ...updates }: { id: number } & Partial<Task>) => {
       return apiFetch(`/api/tasks/${id}`, {
         method: 'PATCH',
         body: JSON.stringify(updates),
@@ -146,7 +146,7 @@ export function useDeleteTask() {
   const queryClient = useQueryClient();
   
   return useMutation({
-    mutationFn: async (id: number) => {
+    mutationFn: async ({ id }: { id: number }) => {
       return apiFetch(`/api/tasks/${id}`, { method: 'DELETE' });
     },
     onSuccess: () => {
@@ -192,16 +192,16 @@ export interface Checklist {
   name: string;
   category?: string | null;
   created_at: string;
-  items: ChecklistItem[];
+  items?: ChecklistItem[];
 }
 
 export interface ChecklistItem {
-  item_id: number;
+  id: number;
   checklist_id: number;
   text: string;
-  position: number;
-  completed: boolean;
-  created_at: string;
+  done: number; // 0 or 1
+  position?: number;
+  created_at?: string;
 }
 
 export interface NewChecklist {
@@ -219,16 +219,34 @@ export interface NewChecklistItem {
 // ============================================================================
 
 /**
- * Fetch checklists with items
+ * Fetch checklists
  */
-export function useChecklists(category?: string) {
+export function useChecklists(filters: { category?: string; q?: string } = {}) {
   return useQuery({
-    queryKey: queryKeys.checklists.list(category),
+    queryKey: queryKeys.checklists.list(filters.category),
     queryFn: async (): Promise<Checklist[]> => {
-      const params = category ? `?category=${encodeURIComponent(category)}` : '';
-      return apiFetch(`/api/checklists${params}`);
+      const params = new URLSearchParams();
+      if (filters.category) params.set('category', filters.category);
+      if (filters.q) params.set('q', filters.q);
+      
+      const query = params.toString();
+      return apiFetch(`/api/checklists${query ? `?${query}` : ''}`);
     },
     staleTime: 1000 * 60 * 5, // 5 minutes for checklists
+  });
+}
+
+/**
+ * Fetch checklist items for a specific checklist
+ */
+export function useChecklistItems(checklistId: number, enabled: boolean = true) {
+  return useQuery({
+    queryKey: ['checklist-items', checklistId],
+    queryFn: async (): Promise<ChecklistItem[]> => {
+      return apiFetch(`/api/checklists/${checklistId}/items`);
+    },
+    enabled: enabled && !!checklistId,
+    staleTime: 1000 * 60 * 5, // 5 minutes
   });
 }
 
@@ -252,17 +270,14 @@ export function useCreateChecklist() {
 }
 
 /**
- * Add item to checklist
+ * Delete a checklist
  */
-export function useAddChecklistItem() {
+export function useDeleteChecklist() {
   const queryClient = useQueryClient();
   
   return useMutation({
-    mutationFn: async ({ checklistId, item }: { checklistId: number; item: NewChecklistItem }) => {
-      return apiFetch(`/api/checklists/${checklistId}/items`, {
-        method: 'POST',
-        body: JSON.stringify(item),
-      });
+    mutationFn: async ({ id }: { id: number }) => {
+      return apiFetch(`/api/checklists/${id}`, { method: 'DELETE' });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.checklists.all });
@@ -271,20 +286,62 @@ export function useAddChecklistItem() {
 }
 
 /**
- * Update checklist item (toggle completion, edit text, etc.)
+ * Add item to checklist
  */
-export function useUpdateChecklistItem() {
+export function useAddChecklistItem() {
   const queryClient = useQueryClient();
   
   return useMutation({
-    mutationFn: async ({ itemId, updates }: { itemId: number; updates: Partial<ChecklistItem> }) => {
-      return apiFetch(`/api/checklists/items/${itemId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(updates),
+    mutationFn: async ({ checklist_id, text, position }: { checklist_id: number; text: string; position?: number }) => {
+      return apiFetch(`/api/checklists/${checklist_id}/items`, {
+        method: 'POST',
+        body: JSON.stringify({ text, position }),
       });
     },
-    onSuccess: () => {
+    onSuccess: (data, variables) => {
+      // Invalidate the specific checklist items
+      queryClient.invalidateQueries({ queryKey: ['checklist-items', variables.checklist_id] });
+      // Also invalidate checklists if they include item counts
       queryClient.invalidateQueries({ queryKey: queryKeys.checklists.all });
+    },
+  });
+}
+
+/**
+ * Toggle checklist item completion
+ */
+export function useToggleChecklistItem() {
+  const queryClient = useQueryClient();
+  
+  return useMutation({
+    mutationFn: async ({ checklist_id, item_id, done }: { checklist_id: number; item_id: number; done: number }) => {
+      return apiFetch(`/api/checklists/${checklist_id}/items/${item_id}/toggle`, {
+        method: 'POST',
+        body: JSON.stringify({ done }),
+      });
+    },
+    onSuccess: (data, variables) => {
+      // Invalidate the specific checklist items
+      queryClient.invalidateQueries({ queryKey: ['checklist-items', variables.checklist_id] });
+    },
+  });
+}
+
+/**
+ * Delete checklist item
+ */
+export function useDeleteChecklistItem() {
+  const queryClient = useQueryClient();
+  
+  return useMutation({
+    mutationFn: async ({ checklist_id, item_id }: { checklist_id: number; item_id: number }) => {
+      return apiFetch(`/api/checklists/${checklist_id}/items/${item_id}`, {
+        method: 'DELETE',
+      });
+    },
+    onSuccess: (data, variables) => {
+      // Invalidate the specific checklist items
+      queryClient.invalidateQueries({ queryKey: ['checklist-items', variables.checklist_id] });
     },
   });
 }
