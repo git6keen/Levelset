@@ -1,6 +1,6 @@
-// lmstudioAdapter.ts (drop-in replacement)
+// adapter_lm.ts - LMStudio integration adapter
 
-import { generateToolRegistry } from "./tools";
+import { generateToolRegistry } from "./tools.js";
 
 const DEFAULT_BASE = "http://127.0.0.1:1234";
 const DEFAULT_MODEL = "lmstudio";
@@ -62,140 +62,130 @@ export function buildSystemPrompt(agent: string, context?: string): string {
 
   const roleTone = role === "Kraken"
     ? `You are Kraken: bold, tactical, but still concise and compliant with the rules below.`
-    : `You are ${role}: a concise, helpful copilot for a personal productivity app. Prefer short, actionable answers.`;
+    : `You are ${role}: a concise, helpful copilot for a personal productivity app.`;
 
   return [
     roleTone,
     ``,
-    `### Tool Registry`,
+    `# Available Tools`,
     registry,
     ``,
-    `### When to act`,
+    `# When to Use Tools`,
     whenToAct,
     ``,
-    `### Output rules`,
+    `# Output Format`,
     outputRules,
     ``,
     fewShot,
-    ctx
+    ctx,
   ].join("\n");
 }
 
-async function postChat(body: any, baseUrl: string) {
+/** Single completion */
+export async function chatOnce(params: ChatParams): Promise<string> {
+  const { message, system, model = DEFAULT_MODEL, baseUrl, temperature = 0.7, top_p, max_tokens = 1000, stop } = params;
   const base = normalizeBase(baseUrl);
-  const res = await fetch(`${base}/v1/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      // If your LM Studio needs an API key, uncomment the next line and set env/API key accordingly:
-      // "Authorization": `Bearer ${process.env.OPENAI_API_KEY ?? ""}`,
-      "Accept": "text/event-stream, application/json;q=0.9, */*;q=0.8",
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res;
-}
 
-export async function chatOnce({
-  message,
-  system = "",
-  model = DEFAULT_MODEL,
-  baseUrl = DEFAULT_BASE,
-  temperature,
-  top_p,
-  max_tokens,
-  stop,
-}: ChatParams): Promise<string> {
-  const body: any = {
+  const messages: Msg[] = [];
+  if (system) messages.push({ role: "system", content: system });
+  messages.push({ role: "user", content: message });
+
+  const payload = {
     model,
+    messages,
+    temperature,
+    max_tokens,
     stream: false,
-    messages: [
-      ...(system ? [{ role: "system", content: system } as Msg] : []),
-      { role: "user", content: message } as Msg,
-    ],
+    ...(top_p !== undefined && { top_p }),
+    ...(stop && { stop }),
   };
-  if (temperature != null) body.temperature = temperature;
-  if (top_p != null) body.top_p = top_p;
-  if (max_tokens != null) body.max_tokens = max_tokens;
-  if (Array.isArray(stop) && stop.length) body.stop = stop;
 
-  const res = await postChat(body, baseUrl);
-  const data: any = await res.json();
+  const resp = await fetch(`${base}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 
-  // OpenAI-like: choices[0].message.content
-  let text =
-    data?.choices?.[0]?.message?.content ??
-    data?.choices?.[0]?.text ??
-    "";
+  if (!resp.ok) {
+    const err = await resp.text().catch(() => "Network error");
+    throw new Error(`LM API error (${resp.status}): ${err}`);
+  }
 
-  return String(text ?? "");
+  const data = await resp.json();
+  const reply = data?.choices?.[0]?.message?.content || "";
+  return String(reply).trim();
 }
 
-export async function chatStream({
-  message,
-  system = "",
-  model = DEFAULT_MODEL,
-  baseUrl = DEFAULT_BASE,
-  temperature,
-  top_p,
-  max_tokens,
-  stop,
-  onChunk,
-}: ChatParams): Promise<void> {
-  if (!onChunk) throw new Error("onChunk handler required for chatStream()");
+/** Streaming completion */
+export async function chatStream(params: ChatParams): Promise<void> {
+  const { message, system, model = DEFAULT_MODEL, baseUrl, temperature = 0.7, top_p, max_tokens = 2000, stop, onChunk } = params;
+  
+  if (!onChunk) {
+    throw new Error("onChunk callback is required for streaming");
+  }
 
-  const body: any = {
+  const base = normalizeBase(baseUrl);
+
+  const messages: Msg[] = [];
+  if (system) messages.push({ role: "system", content: system });
+  messages.push({ role: "user", content: message });
+
+  const payload = {
     model,
+    messages,
+    temperature,
+    max_tokens,
     stream: true,
-    messages: [
-      ...(system ? [{ role: "system", content: system } as Msg] : []),
-      { role: "user", content: message } as Msg,
-    ],
+    ...(top_p !== undefined && { top_p }),
+    ...(stop && { stop }),
   };
-  if (temperature != null) body.temperature = temperature;
-  if (top_p != null) body.top_p = top_p;
-  if (max_tokens != null) body.max_tokens = max_tokens;
-  if (Array.isArray(stop) && stop.length) body.stop = stop;
 
-  const res = await postChat(body, baseUrl);
-  if (!res.body) throw new Error("no stream body");
+  const resp = await fetch(`${base}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 
-  const reader = res.body.getReader();
-  const dec = new TextDecoder();
-  let done = false, buf = "";
+  if (!resp.ok) {
+    const err = await resp.text().catch(() => "Network error");
+    throw new Error(`LM API error (${resp.status}): ${err}`);
+  }
 
-  while (!done) {
-    const { value, done: d } = await reader.read(); done = d;
-    if (!value) continue;
+  const reader = resp.body?.getReader();
+  if (!reader) {
+    throw new Error("No response body reader available");
+  }
 
-    buf += dec.decode(value, { stream: !done });
-    const lines = buf.split(/\r?\n/);
-    buf = lines.pop() || "";
+  const decoder = new TextDecoder();
+  
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    for (const raw of lines) {
-      const s = raw.replace(/^data:\s?/, "").trim();
-      if (!s) continue;
-      if (s === "[DONE]") { done = true; break; }
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split("\n");
 
-      // Try to parse OpenAI-like SSE; fall back to raw push if JSON parsing fails
-      try {
-        const j = JSON.parse(s);
-        // Prefer delta.content; fall back to text; finally message.content
-        const delta =
-          j?.choices?.[0]?.delta?.content ??
-          j?.choices?.[0]?.text ??
-          j?.choices?.[0]?.message?.content ??
-          "";
-
-        if (delta) onChunk(String(delta));
-      } catch {
-        // Some servers send non-JSON lines in SSE; just pass through
-        onChunk(s);
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith("data: ")) continue;
+        
+        const dataStr = trimmed.slice(6); // Remove "data: "
+        if (dataStr === "[DONE]") continue;
+        
+        try {
+          const parsed = JSON.parse(dataStr);
+          const content = parsed?.choices?.[0]?.delta?.content;
+          if (content) {
+            onChunk(content);
+          }
+        } catch (parseErr) {
+          // Skip malformed JSON chunks
+          continue;
+        }
       }
     }
+  } finally {
+    reader.releaseLock();
   }
 }
-
-// alias for server SSE bridge
-export const stream = chatStream;
