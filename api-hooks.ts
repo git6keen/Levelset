@@ -1,35 +1,41 @@
-// FILE: api-hooks.ts - Complete modern API hooks with Tanstack Query
+// FILE: api-hooks.ts - Complete modern API layer with Tanstack Query
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from './query-client.js';
 
 // ============================================================================
-// SETTINGS HELPER
+// SETTINGS & CONFIGURATION
 // ============================================================================
 function getApiBase(): string {
   try {
-    const s = JSON.parse(localStorage.getItem("app.settings.v1") || "{}");
-    return (s?.aiEndpoint || "http://127.0.0.1:8002").replace(/\/+$/, "");
+    const settings = JSON.parse(localStorage.getItem("app.settings.v1") || "{}");
+    return (settings?.aiEndpoint || "http://127.0.0.1:8002").replace(/\/+$/, "");
   } catch {
     return "http://127.0.0.1:8002";
   }
 }
 
 // ============================================================================
-// FETCH UTILITIES
+// MODERN FETCH UTILITY - Fixed Content-Type header issue
 // ============================================================================
 async function apiFetch<T = any>(path: string, options?: RequestInit): Promise<T> {
   const baseUrl = getApiBase();
+  const { body, headers = {}, ...restOptions } = options || {};
+  
+  // Only set Content-Type for requests with a body
+  const requestHeaders: HeadersInit = body ? {
+    'Content-Type': 'application/json',
+    ...headers,
+  } : headers;
+
   const response = await fetch(`${baseUrl}${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-    ...options,
+    headers: requestHeaders,
+    body,
+    ...restOptions,
   });
 
   if (!response.ok) {
-    const error = await response.text().catch(() => 'Network error');
-    throw new Error(`HTTP ${response.status}: ${error}`);
+    const errorText = await response.text().catch(() => 'Network error');
+    throw new Error(`HTTP ${response.status}: ${errorText}`);
   }
 
   const contentType = response.headers.get('content-type');
@@ -40,8 +46,10 @@ async function apiFetch<T = any>(path: string, options?: RequestInit): Promise<T
 }
 
 // ============================================================================
-// TASK TYPES
+// TYPE DEFINITIONS
 // ============================================================================
+
+// Tasks
 export interface Task {
   task_id: number;
   title: string;
@@ -50,16 +58,9 @@ export interface Task {
   xp: number;
   coins: number;
   category_id?: number | null;
-  created_at?: string | null;
+  created_at: string;
   due_date?: string | null;
   due_time?: string | null;
-}
-
-export interface TaskFilters {
-  q?: string;
-  priority?: number;
-  sort?: 'priority' | 'title' | 'created_at';
-  category_id?: string;
 }
 
 export interface NewTask {
@@ -73,12 +74,115 @@ export interface NewTask {
   due_time?: string;
 }
 
+export interface TaskFilters {
+  q?: string;
+  priority?: number;
+  sort?: 'priority' | 'title' | 'created_at';
+  category_id?: string;
+}
+
+export interface TaskCompletion {
+  ok: boolean;
+  completion_id: number;
+  earned_xp: number;
+  earned_coins: number;
+  message: string;
+}
+
+// Checklists
+export interface Checklist {
+  checklist_id: number;
+  name: string;
+  category?: string | null;
+  created_at: string;
+  items?: ChecklistItem[];
+}
+
+export interface ChecklistItem {
+  item_id: number;
+  checklist_id: number;
+  text: string;
+  completed: boolean;
+  position: number;
+  created_at: string;
+}
+
+export interface NewChecklist {
+  name: string;
+  category?: string;
+}
+
+export interface NewChecklistItem {
+  text: string;
+  position?: number;
+}
+
+// Journal
+export interface JournalEntry {
+  entry_id: number;
+  text: string;
+  mood?: number | null;
+  energy?: number | null;
+  stress?: number | null;
+  tags?: string | null;
+  created_at: string;
+}
+
+export interface NewJournalEntry {
+  text: string;
+  mood?: number;
+  energy?: number;
+  stress?: number;
+  tags?: string;
+}
+
+// Admin
+export interface HealthCheck {
+  status: string;
+  timestamp: string;
+  uptime: number;
+  database: string;
+  server: string;
+  db: {
+    journal_mode: string;
+    foreign_keys: boolean;
+    wal: boolean;
+  };
+  counts: {
+    tasks: number;
+    journal: number;
+    checklists: number;
+  };
+}
+
+export interface AdminStats {
+  tasks: {
+    total: { count: number };
+    by_priority: Array<{ priority: number; count: number }>;
+    completed_today: { count: number };
+    total_xp_earned: { total: number };
+    total_coins_earned: { total: number };
+  };
+  journal: {
+    total_entries: { count: number };
+    entries_this_week: { count: number };
+    avg_mood: { avg: number };
+    avg_energy: { avg: number };
+    avg_stress: { avg: number };
+  };
+  checklists: {
+    total: { count: number };
+    total_items: { count: number };
+    completed_items: { count: number };
+  };
+}
+
 // ============================================================================
-// TASKS HOOKS
+// TASK HOOKS
 // ============================================================================
 
 /**
- * Fetch tasks with automatic caching and background updates
+ * Fetch tasks with intelligent caching and background updates
  */
 export function useTasks(filters: TaskFilters = {}) {
   return useQuery({
@@ -93,12 +197,13 @@ export function useTasks(filters: TaskFilters = {}) {
       const query = params.toString();
       return apiFetch(`/api/tasks${query ? `?${query}` : ''}`);
     },
-    staleTime: 1000 * 60 * 2, // 2 minutes for tasks
+    staleTime: 1000 * 60 * 2, // 2 minutes
+    gcTime: 1000 * 60 * 10, // 10 minutes garbage collection
   });
 }
 
 /**
- * Create a new task with optimistic updates
+ * Create task with optimistic updates and cache invalidation
  */
 export function useCreateTask() {
   const queryClient = useQueryClient();
@@ -111,8 +216,7 @@ export function useCreateTask() {
       });
     },
     onSuccess: () => {
-      // Invalidate and refetch all task lists
-      queryClient.invalidateQueries({ queryKey: queryKeys.tasks.lists() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.tasks.all });
     },
     onError: (error) => {
       console.error('Failed to create task:', error);
@@ -121,26 +225,52 @@ export function useCreateTask() {
 }
 
 /**
- * Update an existing task
+ * Update task with optimistic updates
  */
 export function useUpdateTask() {
   const queryClient = useQueryClient();
   
   return useMutation({
-    mutationFn: async ({ id, ...updates }: { id: number } & Partial<Task>) => {
+    mutationFn: async ({ id, ...updates }: { id: number } & Partial<NewTask>) => {
       return apiFetch(`/api/tasks/${id}`, {
         method: 'PATCH',
         body: JSON.stringify(updates),
       });
     },
-    onSuccess: () => {
+    onMutate: async ({ id, ...updates }) => {
+      // Optimistic update
+      await queryClient.cancelQueries({ queryKey: queryKeys.tasks.all });
+      
+      const previousTasks = queryClient.getQueriesData({ queryKey: queryKeys.tasks.all });
+      
+      queryClient.setQueriesData(
+        { queryKey: queryKeys.tasks.all },
+        (oldData: Task[] | undefined) => {
+          if (!oldData) return oldData;
+          return oldData.map(task => 
+            task.task_id === id ? { ...task, ...updates } : task
+          );
+        }
+      );
+      
+      return { previousTasks };
+    },
+    onError: (error, variables, context) => {
+      // Revert optimistic update on error
+      if (context?.previousTasks) {
+        context.previousTasks.forEach(([queryKey, data]) => {
+          queryClient.setQueryData(queryKey, data);
+        });
+      }
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.tasks.all });
     },
   });
 }
 
 /**
- * Delete a task
+ * Delete task with optimistic removal
  */
 export function useDeleteTask() {
   const queryClient = useQueryClient();
@@ -149,109 +279,104 @@ export function useDeleteTask() {
     mutationFn: async ({ id }: { id: number }) => {
       return apiFetch(`/api/tasks/${id}`, { method: 'DELETE' });
     },
-    onSuccess: () => {
+    onMutate: async ({ id }) => {
+      // Optimistic removal
+      await queryClient.cancelQueries({ queryKey: queryKeys.tasks.all });
+      
+      const previousTasks = queryClient.getQueriesData({ queryKey: queryKeys.tasks.all });
+      
+      queryClient.setQueriesData(
+        { queryKey: queryKeys.tasks.all },
+        (oldData: Task[] | undefined) => {
+          if (!oldData) return oldData;
+          return oldData.filter(task => task.task_id !== id);
+        }
+      );
+      
+      return { previousTasks };
+    },
+    onError: (error, variables, context) => {
+      // Revert optimistic update on error
+      if (context?.previousTasks) {
+        context.previousTasks.forEach(([queryKey, data]) => {
+          queryClient.setQueryData(queryKey, data);
+        });
+      }
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.tasks.all });
     },
   });
 }
 
 /**
- * Complete a task with optimistic updates
+ * Complete task with optimistic removal and XP tracking
  */
 export function useCompleteTask() {
   const queryClient = useQueryClient();
   
   return useMutation({
-    mutationFn: async ({ id, note }: { id: number; note?: string }) => {
+    mutationFn: async ({ id, note }: { id: number; note?: string }): Promise<TaskCompletion> => {
       return apiFetch(`/api/tasks/${id}/complete`, {
         method: 'POST',
         body: JSON.stringify({ note }),
       });
     },
-    onSuccess: (data, variables) => {
-      // Optimistically remove the task from the list
+    onMutate: async ({ id }) => {
+      // Optimistic removal
+      await queryClient.cancelQueries({ queryKey: queryKeys.tasks.all });
+      
+      const previousTasks = queryClient.getQueriesData({ queryKey: queryKeys.tasks.all });
+      
       queryClient.setQueriesData(
-        { queryKey: queryKeys.tasks.lists() },
+        { queryKey: queryKeys.tasks.all },
         (oldData: Task[] | undefined) => {
           if (!oldData) return oldData;
-          return oldData.filter(task => task.task_id !== variables.id);
+          return oldData.filter(task => task.task_id !== id);
         }
       );
       
-      // Also invalidate to get fresh data
+      return { previousTasks };
+    },
+    onError: (error, variables, context) => {
+      // Revert optimistic update on error
+      if (context?.previousTasks) {
+        context.previousTasks.forEach(([queryKey, data]) => {
+          queryClient.setQueryData(queryKey, data);
+        });
+      }
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.tasks.all });
+      // Also invalidate stats since completion affects totals
+      queryClient.invalidateQueries({ queryKey: ['admin', 'stats'] });
     },
   });
 }
 
 // ============================================================================
-// CHECKLIST TYPES
-// ============================================================================
-export interface Checklist {
-  checklist_id: number;
-  name: string;
-  category?: string | null;
-  created_at: string;
-  items?: ChecklistItem[];
-}
-
-export interface ChecklistItem {
-  id: number;
-  checklist_id: number;
-  text: string;
-  done: number; // 0 or 1
-  position?: number;
-  created_at?: string;
-}
-
-export interface NewChecklist {
-  name: string;
-  category?: string;
-}
-
-export interface NewChecklistItem {
-  text: string;
-  position?: number;
-}
-
-// ============================================================================
-// CHECKLISTS HOOKS
+// CHECKLIST HOOKS
 // ============================================================================
 
 /**
- * Fetch checklists
+ * Fetch checklists with items included
  */
-export function useChecklists(filters: { category?: string; q?: string } = {}) {
+export function useChecklists(filters: { category?: string } = {}) {
   return useQuery({
     queryKey: queryKeys.checklists.list(filters.category),
     queryFn: async (): Promise<Checklist[]> => {
       const params = new URLSearchParams();
       if (filters.category) params.set('category', filters.category);
-      if (filters.q) params.set('q', filters.q);
       
       const query = params.toString();
       return apiFetch(`/api/checklists${query ? `?${query}` : ''}`);
     },
-    staleTime: 1000 * 60 * 5, // 5 minutes for checklists
-  });
-}
-
-/**
- * Fetch checklist items for a specific checklist
- */
-export function useChecklistItems(checklistId: number, enabled: boolean = true) {
-  return useQuery({
-    queryKey: ['checklist-items', checklistId],
-    queryFn: async (): Promise<ChecklistItem[]> => {
-      return apiFetch(`/api/checklists/${checklistId}/items`);
-    },
-    enabled: enabled && !!checklistId,
     staleTime: 1000 * 60 * 5, // 5 minutes
   });
 }
 
 /**
- * Create a new checklist
+ * Create checklist
  */
 export function useCreateChecklist() {
   const queryClient = useQueryClient();
@@ -262,22 +387,6 @@ export function useCreateChecklist() {
         method: 'POST',
         body: JSON.stringify(newChecklist),
       });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.checklists.all });
-    },
-  });
-}
-
-/**
- * Delete a checklist
- */
-export function useDeleteChecklist() {
-  const queryClient = useQueryClient();
-  
-  return useMutation({
-    mutationFn: async ({ id }: { id: number }) => {
-      return apiFetch(`/api/checklists/${id}`, { method: 'DELETE' });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.checklists.all });
@@ -298,10 +407,7 @@ export function useAddChecklistItem() {
         body: JSON.stringify({ text, position }),
       });
     },
-    onSuccess: (data, variables) => {
-      // Invalidate the specific checklist items
-      queryClient.invalidateQueries({ queryKey: ['checklist-items', variables.checklist_id] });
-      // Also invalidate checklists if they include item counts
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.checklists.all });
     },
   });
@@ -315,14 +421,32 @@ export function useToggleChecklistItem() {
   
   return useMutation({
     mutationFn: async ({ checklist_id, item_id, done }: { checklist_id: number; item_id: number; done: number }) => {
-      return apiFetch(`/api/checklists/${checklist_id}/items/${item_id}/toggle`, {
-        method: 'POST',
-        body: JSON.stringify({ done }),
+      return apiFetch(`/api/checklists/items/${item_id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ completed: done === 1 }),
       });
     },
-    onSuccess: (data, variables) => {
-      // Invalidate the specific checklist items
-      queryClient.invalidateQueries({ queryKey: ['checklist-items', variables.checklist_id] });
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.checklists.all });
+    },
+  });
+}
+
+/**
+ * Update checklist item (toggle completion, edit text, etc.)
+ */
+export function useUpdateChecklistItem() {
+  const queryClient = useQueryClient();
+  
+  return useMutation({
+    mutationFn: async ({ item_id, updates }: { item_id: number; updates: Partial<ChecklistItem> }) => {
+      return apiFetch(`/api/checklists/items/${item_id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(updates),
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.checklists.all });
     },
   });
 }
@@ -335,40 +459,20 @@ export function useDeleteChecklistItem() {
   
   return useMutation({
     mutationFn: async ({ checklist_id, item_id }: { checklist_id: number; item_id: number }) => {
-      return apiFetch(`/api/checklists/${checklist_id}/items/${item_id}`, {
-        method: 'DELETE',
-      });
+      return apiFetch(`/api/checklists/items/${item_id}`, { method: 'DELETE' });
     },
-    onSuccess: (data, variables) => {
-      // Invalidate the specific checklist items
-      queryClient.invalidateQueries({ queryKey: ['checklist-items', variables.checklist_id] });
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.checklists.all });
     },
   });
 }
 
 // ============================================================================
-// JOURNAL TYPES & HOOKS
+// JOURNAL HOOKS
 // ============================================================================
-export interface JournalEntry {
-  entry_id: number;
-  text: string;
-  mood?: number | null;
-  energy?: number | null;
-  stress?: number | null;
-  tags?: string | null;
-  created_at: string;
-}
-
-export interface NewJournalEntry {
-  text: string;
-  mood?: number;
-  energy?: number;
-  stress?: number;
-  tags?: string;
-}
 
 /**
- * Fetch recent journal entries
+ * Fetch journal entries with date filtering
  */
 export function useJournalEntries(params?: { from?: string; to?: string }) {
   return useQuery({
@@ -381,12 +485,12 @@ export function useJournalEntries(params?: { from?: string; to?: string }) {
       const query = searchParams.toString();
       return apiFetch(`/api/journal/recent${query ? `?${query}` : ''}`);
     },
-    staleTime: 1000 * 60 * 10, // 10 minutes for journal
+    staleTime: 1000 * 60 * 10, // 10 minutes
   });
 }
 
 /**
- * Create a journal entry
+ * Create journal entry
  */
 export function useCreateJournalEntry() {
   const queryClient = useQueryClient();
@@ -400,20 +504,178 @@ export function useCreateJournalEntry() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.journal.all });
+      queryClient.invalidateQueries({ queryKey: ['admin', 'stats'] });
     },
   });
 }
 
 // ============================================================================
-// HEALTH CHECK HOOK
+// CHAT/AI HOOKS
 // ============================================================================
+
+/**
+ * Send chat message to AI
+ */
+export function useChatMessage() {
+  return useMutation({
+    mutationFn: async ({ message, agent = "Assistant", model = "lmstudio", context = "" }: {
+      message: string;
+      agent?: string;
+      model?: string;
+      context?: string;
+    }) => {
+      return apiFetch('/api/chat', {
+        method: 'POST',
+        body: JSON.stringify({ message, agent, model, context }),
+      });
+    },
+  });
+}
+
+/**
+ * Execute AI tool
+ */
+export function useExecuteTool() {
+  const queryClient = useQueryClient();
+  
+  return useMutation({
+    mutationFn: async ({ name, args }: { name: string; args: any }) => {
+      return apiFetch('/api/tools/exec', {
+        method: 'POST',
+        body: JSON.stringify({ name, args }),
+      });
+    },
+    onSuccess: () => {
+      // Tool execution might affect any data, so invalidate broadly
+      queryClient.invalidateQueries({ queryKey: queryKeys.tasks.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.checklists.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.journal.all });
+    },
+  });
+}
+
+// ============================================================================
+// ADMIN HOOKS
+// ============================================================================
+
+/**
+ * Health check with automatic polling
+ */
 export function useHealthCheck() {
   return useQuery({
-    queryKey: queryKeys.health,
-    queryFn: async () => {
+    queryKey: ['admin', 'health'],
+    queryFn: async (): Promise<HealthCheck> => {
       return apiFetch('/api/admin/health');
     },
     staleTime: 1000 * 30, // 30 seconds
-    refetchInterval: 1000 * 60, // Refetch every minute
+    refetchInterval: 1000 * 60, // Poll every minute
+    retry: 3,
+  });
+}
+
+/**
+ * Get detailed admin statistics
+ */
+export function useAdminStats() {
+  return useQuery({
+    queryKey: ['admin', 'stats'],
+    queryFn: async (): Promise<AdminStats> => {
+      return apiFetch('/api/admin/stats');
+    },
+    staleTime: 1000 * 60 * 5, // 5 minutes
+  });
+}
+
+/**
+ * Database maintenance operations
+ */
+export function useDbMaintenance() {
+  const queryClient = useQueryClient();
+  
+  return {
+    vacuum: useMutation({
+      mutationFn: async () => apiFetch('/api/admin/vacuum', { method: 'POST' }),
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: ['admin'] });
+      },
+    }),
+    
+    reindex: useMutation({
+      mutationFn: async () => apiFetch('/api/admin/reindex', { method: 'POST' }),
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: ['admin'] });
+      },
+    }),
+  };
+}
+
+// ============================================================================
+// EXPORT UTILITY HOOKS
+// ============================================================================
+
+/**
+ * Export data in various formats
+ */
+
+/**
+ * Fetch checklist items for a specific checklist
+ */
+export function useChecklistItems(checklistId: number, enabled: boolean = true) {
+  return useQuery({
+    queryKey: ['checklist-items', checklistId],
+    queryFn: async (): Promise<ChecklistItem[]> => {
+      return apiFetch(`/api/checklists/${checklistId}/items`);
+    },
+    enabled: enabled && !!checklistId,
+    staleTime: 1000 * 60 * 5, // 5 minutes
+  });
+}
+
+/**
+ * Delete checklist
+ */
+export function useDeleteChecklist() {
+  const queryClient = useQueryClient();
+  
+  return useMutation({
+    mutationFn: async ({ id }: { id: number }) => {
+      return apiFetch(`/api/checklists/${id}`, { method: 'DELETE' });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.checklists.all });
+    },
+  });
+}
+export function useExportData() {
+  return {
+    exportTasks: useMutation({
+      mutationFn: async (format: 'json' | 'csv' = 'json') => {
+        return apiFetch(`/api/admin/export/tasks?format=${format}`);
+      },
+    }),
+    
+    exportJournal: useMutation({
+      mutationFn: async (format: 'json' | 'csv' = 'json') => {
+        return apiFetch(`/api/admin/export/journal?format=${format}`);
+      },
+    }),
+  };
+}
+
+// ============================================================================
+// TRACE/DEBUG HOOKS
+// ============================================================================
+
+/**
+ * Get trace events for debugging
+ */
+export function useTraceEvents() {
+  return useQuery({
+    queryKey: ['admin', 'trace'],
+    queryFn: async () => {
+      return apiFetch('/api/trace');
+    },
+    enabled: process.env.NODE_ENV === 'development',
+    staleTime: 1000 * 10, // 10 seconds in dev
   });
 }
