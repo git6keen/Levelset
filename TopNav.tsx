@@ -1,4 +1,4 @@
-// TopNav.tsx
+// TopNav.tsx - Updated without Journal link
 import React from "react";
 import { NavLink } from "react-router-dom";
 import { useConnections, stateColor } from "./useConnections";
@@ -14,8 +14,8 @@ export default function TopNav() {
           <NavLink to="/" end className={({ isActive }) => `tab${isActive ? " active" : ""}`}>Dashboard</NavLink>
           <NavLink to="/tasks" className={({ isActive }) => `tab${isActive ? " active" : ""}`}>Tasks</NavLink>
           <NavLink to="/checklists" className={({ isActive }) => `tab${isActive ? " active" : ""}`}>Checklists</NavLink>
-          <NavLink to="/journal" className={({ isActive }) => `tab${isActive ? " active" : ""}`}>Journal</NavLink>
           <NavLink to="/rewards" className={({ isActive }) => `tab${isActive ? " active" : ""}`}>Rewards</NavLink>
+          <NavLink to="/quests" className={({ isActive }) => `tab${isActive ? " active" : ""}`}>Quests</NavLink>
           <NavLink to="/chat" className={({ isActive }) => `tab${isActive ? " active" : ""}`}>Chat</NavLink>
           <NavLink to="/settings" className={({ isActive }) => `tab${isActive ? " active" : ""}`}>Settings</NavLink>
         </nav>
