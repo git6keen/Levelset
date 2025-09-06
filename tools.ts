@@ -7,6 +7,10 @@ const db = new Database("./app.db");
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 
+export function initializeTools(database: Database.Database): void {
+  db = database;
+}
+
 // ============================================================================
 // TOOL REGISTRY - Single source of truth for available tools
 // ============================================================================

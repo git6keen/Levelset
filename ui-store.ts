@@ -198,4 +198,4 @@ export const useModals = () => ({
   openModal: useUIStore((state) => state.openModal),
   closeModal: useUIStore((state) => state.closeModal),
   closeAllModals: useUIStore((state) => state.closeAllModals),
-});
+});	

@@ -1,13 +1,13 @@
-// FILE: fastify-server-drizzle.ts - Modern Fastify backend with Drizzle ORM
+// FILE: fastify-server.ts - Modern Fastify backend with ESM fixes
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import sensible from '@fastify/sensible';
+import staticPlugin from '@fastify/static';
+import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 import { logEvent, getEvents } from './trace.js';
 import { executeTool } from './tools.js';
-import { db, rawDb, getDatabaseInfo, completeTaskTransaction } from './db.js';
-import { schema } from './schema.js';
-import { eq, desc, asc, and, or, like, isNull, isNotNull } from 'drizzle-orm';
 
 // Initialize Fastify
 const fastify = Fastify({
@@ -19,20 +19,29 @@ const fastify = Fastify({
   }
 });
 
+// Database setup
+const db = new Database('./app.db');
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 8002;
 
 // ============================================================================
 // PLUGINS & MIDDLEWARE
 // ============================================================================
 
-// CORS plugin
+// Register sensible plugin for httpErrors support
+await fastify.register(sensible);
+
+// CORS plugin with full method support
 await fastify.register(cors, {
   origin: true,
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
 });
 
 // Static file serving
-await fastify.register(import('@fastify/static'), {
+await fastify.register(staticPlugin, {
   root: process.cwd(),
   prefix: '/'
 });
@@ -86,8 +95,20 @@ const ChecklistItemSchema = {
   }
 } as const;
 
+const ChatSchema = {
+  type: 'object',
+  required: ['message'],
+  properties: {
+    message: { type: 'string', minLength: 1, maxLength: 10000 },
+    agent: { type: 'string', enum: ['Assistant', 'Kraken'], default: 'Assistant' },
+    model: { type: 'string', default: 'lmstudio' },
+    context: { type: 'string', maxLength: 5000 },
+    lmBase: { type: 'string', format: 'uri', default: 'http://127.0.0.1:1234' }
+  }
+} as const;
+
 // ============================================================================
-// TASKS API - Now with Drizzle ORM magic!
+// TASKS API
 // ============================================================================
 
 // GET /api/tasks
@@ -107,69 +128,48 @@ fastify.get('/api/tasks', {
   try {
     const { q, priority, sort, category_id } = request.query as any;
     
-    // Start with base query - look at this beautiful type safety!
-    let query = db.select({
-      task_id: schema.tasks.task_id,
-      title: schema.tasks.title,
-      description: schema.tasks.description,
-      priority: schema.tasks.priority,
-      xp: schema.tasks.xp_reward,
-      coins: schema.tasks.coin_reward,
-      category_id: schema.tasks.category_id,
-      created_at: schema.tasks.created_at,
-      due_date: schema.tasks.due_date,
-      due_time: schema.tasks.due_time
-    }).from(schema.tasks);
+    let sql = "SELECT task_id, title, description, priority, xp_reward as xp, coin_reward as coins, category_id, created_at, due_date, due_time FROM tasks WHERE is_active = 1";
+    const params: any[] = [];
 
-    // Build WHERE conditions
-    const conditions = [eq(schema.tasks.is_active, true)];
-
-    // Search filter - no SQL injection possible!
     if (q?.trim()) {
-      conditions.push(
-        or(
-          like(schema.tasks.title, `%${q.trim()}%`),
-          like(schema.tasks.description, `%${q.trim()}%`)
-        )!
-      );
+      sql += " AND (title LIKE ? OR description LIKE ?)";
+      const searchTerm = `%${q.trim()}%`;
+      params.push(searchTerm, searchTerm);
     }
 
-    // Priority filter
     if (priority) {
-      conditions.push(eq(schema.tasks.priority, priority));
+      sql += " AND priority = ?";
+      params.push(priority);
     }
 
-    // Category filter
     if (category_id !== undefined) {
       if (category_id === "" || category_id === "null") {
-        conditions.push(isNull(schema.tasks.category_id));
+        sql += " AND category_id IS NULL";
       } else if (!isNaN(Number(category_id))) {
-        conditions.push(eq(schema.tasks.category_id, Number(category_id)));
+        sql += " AND category_id = ?";
+        params.push(Number(category_id));
       }
     }
 
-    // Apply WHERE conditions
-    query = query.where(and(...conditions));
-
-    // Apply sorting - TypeScript knows these are valid columns!
+    // Apply sorting
     switch (sort) {
       case 'priority':
-        query = query.orderBy(desc(schema.tasks.priority), desc(schema.tasks.created_at));
+        sql += " ORDER BY priority DESC, created_at DESC";
         break;
       case 'title':
-        query = query.orderBy(asc(schema.tasks.title));
+        sql += " ORDER BY title ASC";
         break;
       case 'created_at':
-        query = query.orderBy(desc(schema.tasks.created_at));
+        sql += " ORDER BY created_at DESC";
         break;
       default:
-        query = query.orderBy(desc(schema.tasks.priority), desc(schema.tasks.created_at));
+        sql += " ORDER BY priority DESC, created_at DESC";
     }
 
-    // Execute with full type safety
-    const tasks = await query;
+    const stmt = db.prepare(sql);
+    const tasks = stmt.all(...params);
     
-    return tasks; // TypeScript knows this is exactly the right type!
+    return tasks;
     
   } catch (error: any) {
     fastify.log.error('GET /api/tasks error:', error);
@@ -186,25 +186,27 @@ fastify.post('/api/tasks', {
   try {
     const { title, description, priority = 2, xp = 0, coins = 0, category_id, due_date, due_time } = request.body as any;
 
-    // Insert with Drizzle - type-safe and beautiful!
-    const result = await db.insert(schema.tasks).values({
+    const stmt = db.prepare(`
+      INSERT INTO tasks (title, description, priority, xp_reward, coin_reward, category_id, due_date, due_time, created_at, is_active)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+    `);
+    
+    const result = stmt.run(
       title,
-      description: description || null,
+      description || null,
       priority,
-      xp_reward: xp,
-      coin_reward: coins,
-      category_id: category_id || null,
-      due_date: due_date || null,
-      due_time: due_time || null,
-      created_at: new Date().toISOString(),
-      is_active: true
-    }).returning();
+      xp,
+      coins,
+      category_id || null,
+      due_date || null,
+      due_time || null,
+      new Date().toISOString()
+    );
 
-    const task = result[0];
-    logEvent("task_created", { task_id: task.task_id, title });
+    logEvent("task_created", { task_id: result.lastInsertRowid, title });
 
     return { 
-      task_id: task.task_id,
+      task_id: result.lastInsertRowid,
       title,
       message: "Task created successfully"
     };
@@ -243,13 +245,24 @@ fastify.patch('/api/tasks/:id', {
     const { id } = request.params as any;
     const updates = request.body as any;
 
-    // Drizzle update - only updates provided fields
-    const result = await db.update(schema.tasks)
-      .set(updates)
-      .where(and(
-        eq(schema.tasks.task_id, id),
-        eq(schema.tasks.is_active, true)
-      ));
+    const allowedFields = ["title", "description", "priority", "xp_reward", "coin_reward", "category_id", "due_date", "due_time"];
+    const setClauses: string[] = [];
+    const values: any[] = [];
+
+    for (const [key, value] of Object.entries(updates)) {
+      if (allowedFields.includes(key) && value !== undefined) {
+        setClauses.push(`${key} = ?`);
+        values.push(value);
+      }
+    }
+
+    if (setClauses.length === 0) {
+      throw fastify.httpErrors.badRequest("No valid fields to update");
+    }
+
+    values.push(id);
+    const stmt = db.prepare(`UPDATE tasks SET ${setClauses.join(", ")} WHERE task_id = ? AND is_active = 1`);
+    const result = stmt.run(...values);
 
     if (result.changes === 0) {
       throw fastify.httpErrors.notFound("Task not found");
@@ -280,13 +293,8 @@ fastify.delete('/api/tasks/:id', {
   try {
     const { id } = request.params as any;
 
-    // Soft delete with Drizzle
-    const result = await db.update(schema.tasks)
-      .set({ is_active: false })
-      .where(and(
-        eq(schema.tasks.task_id, id),
-        eq(schema.tasks.is_active, true)
-      ));
+    const stmt = db.prepare("UPDATE tasks SET is_active = 0 WHERE task_id = ? AND is_active = 1");
+    const result = stmt.run(id);
 
     if (result.changes === 0) {
       throw fastify.httpErrors.notFound("Task not found");
@@ -303,7 +311,7 @@ fastify.delete('/api/tasks/:id', {
 });
 
 // ============================================================================
-// TASK COMPLETIONS API - Using our transaction helper!
+// TASK COMPLETIONS API
 // ============================================================================
 
 // POST /api/tasks/:id/complete
@@ -328,34 +336,55 @@ fastify.post('/api/tasks/:id/complete', {
     const { id } = request.params as any;
     const { note } = request.body as any;
 
-    // Use our atomic transaction helper - bulletproof!
-    const result = completeTaskTransaction(id, note);
+    // Get task details first
+    const taskStmt = db.prepare("SELECT * FROM tasks WHERE task_id = ? AND is_active = 1");
+    const task = taskStmt.get(id);
+
+    if (!task) {
+      throw fastify.httpErrors.notFound("Task not found");
+    }
+
+    // Create completion record
+    const completionStmt = db.prepare(`
+      INSERT INTO task_completions (task_id, xp_earned, coins_earned, note, completed_at)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+
+    const completionResult = completionStmt.run(
+      id,
+      (task as any).xp_reward || 0,
+      (task as any).coin_reward || 0,
+      note || null,
+      new Date().toISOString()
+    );
+
+    // Soft delete the task
+    const deleteStmt = db.prepare("UPDATE tasks SET is_active = 0 WHERE task_id = ?");
+    deleteStmt.run(id);
 
     logEvent("task_completed", { 
       task_id: id, 
-      completion_id: result.completion.completion_id,
-      xp: result.earned_xp,
-      coins: result.earned_coins
+      completion_id: completionResult.lastInsertRowid,
+      xp: (task as any).xp_reward,
+      coins: (task as any).coin_reward
     });
 
     return {
       ok: true,
-      completion_id: result.completion.completion_id,
-      earned_xp: result.earned_xp,
-      earned_coins: result.earned_coins,
+      completion_id: completionResult.lastInsertRowid,
+      earned_xp: (task as any).xp_reward || 0,
+      earned_coins: (task as any).coin_reward || 0,
       message: "Task completed successfully!"
     };
   } catch (error: any) {
-    if (error.message === 'Task not found') {
-      throw fastify.httpErrors.notFound("Task not found");
-    }
+    if (error.statusCode) throw error;
     fastify.log.error('POST /api/tasks/:id/complete error:', error);
     throw fastify.httpErrors.internalServerError(error.message);
   }
 });
 
 // ============================================================================
-// CHECKLISTS API - Drizzle style!
+// CHECKLISTS API
 // ============================================================================
 
 // GET /api/checklists
@@ -372,26 +401,25 @@ fastify.get('/api/checklists', {
   try {
     const { category } = request.query as any;
     
-    // Build query with optional category filter
-    let checklistsQuery = db.select().from(schema.checklists);
-    
-    if (category?.trim()) {
-      checklistsQuery = checklistsQuery.where(eq(schema.checklists.category, category.trim()));
-    }
-    
-    checklistsQuery = checklistsQuery.orderBy(desc(schema.checklists.created_at));
-    
-    const checklists = await checklistsQuery;
+    let sql = "SELECT * FROM checklists WHERE 1=1";
+    const params: any[] = [];
 
-    // Get items for each checklist using a single query
-    const allItems = await db.select()
-      .from(schema.checklistItems)
-      .orderBy(asc(schema.checklistItems.position), asc(schema.checklistItems.item_id));
+    if (category?.trim()) {
+      sql += " AND category = ?";
+      params.push(category.trim());
+    }
+
+    sql += " ORDER BY created_at DESC";
+
+    const stmt = db.prepare(sql);
+    const checklists = stmt.all(...params);
+
+    // Get items for each checklist
+    const itemsStmt = db.prepare("SELECT * FROM checklist_items WHERE checklist_id = ? ORDER BY position ASC, item_id ASC");
     
-    // Group items by checklist
     const result = checklists.map(checklist => ({
       ...checklist,
-      items: allItems.filter(item => item.checklist_id === checklist.checklist_id)
+      items: itemsStmt.all((checklist as any).checklist_id)
     }));
 
     return result;
@@ -410,17 +438,17 @@ fastify.post('/api/checklists', {
   try {
     const { name, category } = request.body as any;
 
-    const result = await db.insert(schema.checklists).values({
-      name,
-      category: category || null,
-      created_at: new Date().toISOString()
-    }).returning();
+    const stmt = db.prepare(`
+      INSERT INTO checklists (name, category, created_at)
+      VALUES (?, ?, ?)
+    `);
+    
+    const result = stmt.run(name, category || null, new Date().toISOString());
 
-    const checklist = result[0];
-    logEvent("checklist_created", { checklist_id: checklist.checklist_id, name });
+    logEvent("checklist_created", { checklist_id: result.lastInsertRowid, name });
 
     return {
-      checklist_id: checklist.checklist_id,
+      checklist_id: result.lastInsertRowid,
       name,
       category: category || null,
       message: "Checklist created successfully"
@@ -448,23 +476,21 @@ fastify.post('/api/checklists/:id/items', {
     const { id: checklistId } = request.params as any;
     const { text, position = 0 } = request.body as any;
 
-    const result = await db.insert(schema.checklistItems).values({
-      checklist_id: checklistId,
-      text,
-      position,
-      completed: false,
-      created_at: new Date().toISOString()
-    }).returning();
+    const stmt = db.prepare(`
+      INSERT INTO checklist_items (checklist_id, text, position, completed, created_at)
+      VALUES (?, ?, ?, 0, ?)
+    `);
+    
+    const result = stmt.run(checklistId, text, position, new Date().toISOString());
 
-    const item = result[0];
     logEvent("checklist_item_added", { 
       checklist_id: checklistId, 
-      item_id: item.item_id,
+      item_id: result.lastInsertRowid,
       text: text.substring(0, 50)
     });
 
     return {
-      item_id: item.item_id,
+      item_id: result.lastInsertRowid,
       checklist_id: checklistId,
       text,
       message: "Item added successfully"
@@ -499,9 +525,24 @@ fastify.patch('/api/checklists/items/:id', {
     const { id: itemId } = request.params as any;
     const updates = request.body as any;
 
-    const result = await db.update(schema.checklistItems)
-      .set(updates)
-      .where(eq(schema.checklistItems.item_id, itemId));
+    const allowedFields = ["text", "position", "completed"];
+    const setClauses: string[] = [];
+    const values: any[] = [];
+
+    for (const [key, value] of Object.entries(updates)) {
+      if (allowedFields.includes(key) && value !== undefined) {
+        setClauses.push(`${key} = ?`);
+        values.push(value);
+      }
+    }
+
+    if (setClauses.length === 0) {
+      throw fastify.httpErrors.badRequest("No valid fields to update");
+    }
+
+    values.push(itemId);
+    const stmt = db.prepare(`UPDATE checklist_items SET ${setClauses.join(", ")} WHERE item_id = ?`);
+    const result = stmt.run(...values);
 
     if (result.changes === 0) {
       throw fastify.httpErrors.notFound("Item not found");
@@ -518,7 +559,7 @@ fastify.patch('/api/checklists/items/:id', {
 });
 
 // ============================================================================
-// JOURNAL API - Type-safe journaling!
+// JOURNAL API
 // ============================================================================
 
 // POST /api/journal
@@ -530,24 +571,28 @@ fastify.post('/api/journal', {
   try {
     const { text, mood, energy, stress, tags } = request.body as any;
 
-    const result = await db.insert(schema.journalEntries).values({
+    const stmt = db.prepare(`
+      INSERT INTO journal_entries (text, mood, energy, stress, tags, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    
+    const result = stmt.run(
       text,
-      mood: mood || null,
-      energy: energy || null,
-      stress: stress || null,
-      tags: tags || null,
-      created_at: new Date().toISOString()
-    }).returning();
+      mood || null,
+      energy || null,
+      stress || null,
+      tags || null,
+      new Date().toISOString()
+    );
 
-    const entry = result[0];
     logEvent("journal_entry_created", { 
-      entry_id: entry.entry_id,
+      entry_id: result.lastInsertRowid,
       mood, energy, stress,
       text_length: text.length
     });
 
     return {
-      entry_id: entry.entry_id,
+      entry_id: result.lastInsertRowid,
       text,
       message: "Journal entry saved successfully"
     };
@@ -572,24 +617,22 @@ fastify.get('/api/journal/recent', {
   try {
     const { from, to } = request.query as any;
     
-    let query = db.select().from(schema.journalEntries);
-    const conditions = [];
+    let sql = "SELECT * FROM journal_entries WHERE 1=1";
+    const params: any[] = [];
 
     if (from) {
-      // In a real app, you'd use proper date comparison
-      conditions.push(like(schema.journalEntries.created_at, `${from}%`));
+      sql += " AND created_at >= ?";
+      params.push(from);
     }
     if (to) {
-      conditions.push(like(schema.journalEntries.created_at, `${to}%`));
+      sql += " AND created_at <= ?";
+      params.push(to);
     }
 
-    if (conditions.length > 0) {
-      query = query.where(and(...conditions));
-    }
+    sql += " ORDER BY created_at DESC LIMIT 100";
 
-    const rows = await query
-      .orderBy(desc(schema.journalEntries.created_at))
-      .limit(100);
+    const stmt = db.prepare(sql);
+    const rows = stmt.all(...params);
     
     return { rows };
   } catch (error: any) {
@@ -601,18 +644,6 @@ fastify.get('/api/journal/recent', {
 // ============================================================================
 // CHAT/AI API
 // ============================================================================
-
-const ChatSchema = {
-  type: 'object',
-  required: ['message'],
-  properties: {
-    message: { type: 'string', minLength: 1, maxLength: 10000 },
-    agent: { type: 'string', enum: ['Assistant', 'Kraken'], default: 'Assistant' },
-    model: { type: 'string', default: 'lmstudio' },
-    context: { type: 'string', maxLength: 5000 },
-    lmBase: { type: 'string', format: 'uri', default: 'http://127.0.0.1:1234' }
-  }
-} as const;
 
 // POST /api/chat
 fastify.post('/api/chat', {
@@ -768,10 +799,13 @@ fastify.get('/api/admin/export/tasks', {
   try {
     const { format } = request.query as any;
     
-    const tasks = await db.select()
-      .from(schema.tasks)
-      .where(eq(schema.tasks.is_active, true))
-      .orderBy(desc(schema.tasks.priority), desc(schema.tasks.created_at));
+    const stmt = db.prepare(`
+      SELECT task_id, title, description, priority, xp_reward, coin_reward, category_id, created_at, due_date, due_time
+      FROM tasks 
+      WHERE is_active = 1 
+      ORDER BY priority DESC, created_at DESC
+    `);
+    const tasks = stmt.all();
     
     if (format === "csv") {
       let csv = "task_id,title,description,priority,xp_reward,coin_reward,category_id,created_at,due_date,due_time\n";
@@ -791,6 +825,65 @@ fastify.get('/api/admin/export/tasks', {
   }
 });
 
+// GET /api/admin/export/journal
+fastify.get('/api/admin/export/journal', {
+  schema: {
+    querystring: {
+      type: 'object',
+      properties: {
+        format: { type: 'string', enum: ['json', 'csv'] }
+      }
+    }
+  }
+}, async (request, reply) => {
+  try {
+    const { format } = request.query as any;
+    
+    const stmt = db.prepare("SELECT * FROM journal_entries ORDER BY created_at DESC");
+    const entries = stmt.all();
+    
+    if (format === "csv") {
+      let csv = "entry_id,text,mood,energy,stress,tags,created_at\n";
+      entries.forEach((entry: any) => {
+        csv += `${entry.entry_id},"${(entry.text || '').replace(/"/g, '""')}",${entry.mood || ''},${entry.energy || ''},${entry.stress || ''},"${(entry.tags || '').replace(/"/g, '""')}",${entry.created_at}\n`;
+      });
+      
+      reply.header("Content-Type", "text/csv");
+      reply.header("Content-Disposition", `attachment; filename="journal-${new Date().toISOString().slice(0,10)}.csv"`);
+      return csv;
+    } else {
+      return entries;
+    }
+  } catch (error: any) {
+    fastify.log.error('GET /api/admin/export/journal error:', error);
+    throw fastify.httpErrors.internalServerError(error.message);
+  }
+});
+
+// POST /api/admin/vacuum
+fastify.post('/api/admin/vacuum', async (request, reply) => {
+  try {
+    db.pragma('vacuum');
+    logEvent("database_vacuum", {});
+    return { message: "Database vacuum completed" };
+  } catch (error: any) {
+    fastify.log.error('POST /api/admin/vacuum error:', error);
+    throw fastify.httpErrors.internalServerError(error.message);
+  }
+});
+
+// POST /api/admin/reindex
+fastify.post('/api/admin/reindex', async (request, reply) => {
+  try {
+    db.pragma('reindex');
+    logEvent("database_reindex", {});
+    return { message: "Database reindex completed" };
+  } catch (error: any) {
+    fastify.log.error('POST /api/admin/reindex error:', error);
+    throw fastify.httpErrors.internalServerError(error.message);
+  }
+});
+
 // GET /api/trace
 fastify.get('/api/trace', async (request, reply) => {
   try {
@@ -803,28 +896,75 @@ fastify.get('/api/trace', async (request, reply) => {
 });
 
 // ============================================================================
-// HEALTH CHECK - Now with Drizzle database info!
+// HEALTH CHECK & STATS
 // ============================================================================
 
 fastify.get('/api/admin/health', async (request, reply) => {
   try {
-    const dbInfo = getDatabaseInfo();
+    const dbInfo = {
+      journal_mode: db.pragma('journal_mode', { simple: true }),
+      foreign_keys: db.pragma('foreign_keys', { simple: true }),
+      wal: db.pragma('journal_mode', { simple: true }) === 'wal'
+    };
+
+    // Get some basic counts
+    const taskCount = db.prepare("SELECT COUNT(*) as count FROM tasks WHERE is_active = 1").get() as any;
+    const journalCount = db.prepare("SELECT COUNT(*) as count FROM journal_entries").get() as any;
+    const checklistCount = db.prepare("SELECT COUNT(*) as count FROM checklists").get() as any;
+
     return { 
       status: "ok", 
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       database: "connected",
-      server: "fastify-drizzle",
-      db: dbInfo
+      server: "fastify-esm-fixed",
+      db: dbInfo,
+      counts: {
+        tasks: taskCount?.count || 0,
+        journal: journalCount?.count || 0,
+        checklists: checklistCount?.count || 0
+      }
     };
   } catch (error: any) {
     return {
       status: "error",
       timestamp: new Date().toISOString(),
       database: "error",
-      server: "fastify-drizzle",
+      server: "fastify-esm-fixed",
       error: error.message
     };
+  }
+});
+
+// GET /api/admin/stats
+fastify.get('/api/admin/stats', async (request, reply) => {
+  try {
+    const stats = {
+      tasks: {
+        total: db.prepare("SELECT COUNT(*) as count FROM tasks WHERE is_active = 1").get(),
+        by_priority: db.prepare("SELECT priority, COUNT(*) as count FROM tasks WHERE is_active = 1 GROUP BY priority ORDER BY priority").all(),
+        completed_today: db.prepare("SELECT COUNT(*) as count FROM task_completions WHERE DATE(completed_at) = DATE('now')").get(),
+        total_xp_earned: db.prepare("SELECT SUM(xp_earned) as total FROM task_completions").get(),
+        total_coins_earned: db.prepare("SELECT SUM(coins_earned) as total FROM task_completions").get()
+      },
+      journal: {
+        total_entries: db.prepare("SELECT COUNT(*) as count FROM journal_entries").get(),
+        entries_this_week: db.prepare("SELECT COUNT(*) as count FROM journal_entries WHERE created_at >= datetime('now', '-7 days')").get(),
+        avg_mood: db.prepare("SELECT AVG(mood) as avg FROM journal_entries WHERE mood IS NOT NULL").get(),
+        avg_energy: db.prepare("SELECT AVG(energy) as avg FROM journal_entries WHERE energy IS NOT NULL").get(),
+        avg_stress: db.prepare("SELECT AVG(stress) as avg FROM journal_entries WHERE stress IS NOT NULL").get()
+      },
+      checklists: {
+        total: db.prepare("SELECT COUNT(*) as count FROM checklists").get(),
+        total_items: db.prepare("SELECT COUNT(*) as count FROM checklist_items").get(),
+        completed_items: db.prepare("SELECT COUNT(*) as count FROM checklist_items WHERE completed = 1").get()
+      }
+    };
+
+    return stats;
+  } catch (error: any) {
+    fastify.log.error('GET /api/admin/stats error:', error);
+    throw fastify.httpErrors.internalServerError(error.message);
   }
 });
 
@@ -835,13 +975,16 @@ fastify.get('/api/admin/health', async (request, reply) => {
 const start = async () => {
   try {
     await fastify.listen({ port: PORT, host: '127.0.0.1' });
-    console.log(`🚀 Fastify + Drizzle server running on http://127.0.0.1:${PORT}`);
-    console.log(`📊 Database: ./app.db (${getDatabaseInfo().journal_mode})`);
-    console.log(`🛡️  Type-safe queries: ENABLED`);
+    console.log(`🚀 Fastify ESM server running on http://127.0.0.1:${PORT}`);
+    console.log(`📊 Database: ./app.db (${db.pragma("journal_mode", { simple: true })})`);
+    console.log(`🛡️  Input validation: ENABLED`);
+    console.log(`🌐 CORS: All methods enabled (including DELETE)`);
+    console.log(`⚡ ESM modules: Properly loaded`);
+    console.log(`🔧 HTTP errors: Available via @fastify/sensible`);
     
-    logEvent("fastify_drizzle_server_start", { 
+    logEvent("fastify_esm_server_start", { 
       port: PORT, 
-      db_info: getDatabaseInfo(),
+      journal_mode: db.pragma("journal_mode", { simple: true }),
       timestamp: new Date().toISOString()
     });
   } catch (err) {
