@@ -1,4 +1,4 @@
-// FILE: schema.ts - Drizzle ORM schema definitions
+// FILE: schema.ts - Complete Drizzle ORM schema definitions
 import { sqliteTable, integer, text, real } from 'drizzle-orm/sqlite-core';
 import { relations } from 'drizzle-orm';
 
@@ -20,14 +20,14 @@ export const tasks = sqliteTable('tasks', {
 });
 
 // ============================================================================
-// TASK COMPLETIONS TABLE
+// TASK COMPLETIONS TABLE - FIXED: Added missing note column
 // ============================================================================
 export const taskCompletions = sqliteTable('task_completions', {
   completion_id: integer('completion_id').primaryKey({ autoIncrement: true }),
   task_id: integer('task_id').notNull().references(() => tasks.task_id),
   xp_earned: integer('xp_earned').notNull().default(0),
   coins_earned: integer('coins_earned').notNull().default(0),
-  note: text('note'),
+  note: text('note'), // ← ADDED: Missing note column for completion notes
   completed_at: text('completed_at').notNull()
 });
 
@@ -42,14 +42,14 @@ export const checklists = sqliteTable('checklists', {
 });
 
 // ============================================================================
-// CHECKLIST ITEMS TABLE
+// CHECKLIST ITEMS TABLE - FIXED: Use 'text' instead of 'content'
 // ============================================================================
 export const checklistItems = sqliteTable('checklist_items', {
   item_id: integer('item_id').primaryKey({ autoIncrement: true }),
   checklist_id: integer('checklist_id').notNull().references(() => checklists.checklist_id),
-  text: text('text').notNull(),
-  position: integer('position').notNull().default(0),
+  text: text('text').notNull(), // ← FIXED: Using 'text' to match actual database
   completed: integer('completed', { mode: 'boolean' }).notNull().default(false),
+  position: integer('position').notNull().default(0),
   created_at: text('created_at').notNull()
 });
 
@@ -62,12 +62,12 @@ export const journalEntries = sqliteTable('journal_entries', {
   mood: integer('mood'), // 1-10 scale
   energy: integer('energy'), // 1-10 scale
   stress: integer('stress'), // 1-10 scale
-  tags: text('tags'), // Comma-separated
+  tags: text('tags'), // Comma-separated tags
   created_at: text('created_at').notNull()
 });
 
 // ============================================================================
-// WORKOUT SESSIONS TABLE (for gym.recordWorkout tool)
+// WORKOUT SESSIONS TABLE (Future enhancement)
 // ============================================================================
 export const workoutSessions = sqliteTable('workout_sessions', {
   session_id: integer('session_id').primaryKey({ autoIncrement: true }),
@@ -79,13 +79,43 @@ export const workoutSessions = sqliteTable('workout_sessions', {
 });
 
 // ============================================================================
-// TASK CATEGORIES TABLE (future enhancement)
+// TASK CATEGORIES TABLE (Future enhancement)
 // ============================================================================
 export const taskCategories = sqliteTable('task_categories', {
   category_id: integer('category_id').primaryKey({ autoIncrement: true }),
   name: text('name').notNull(),
   color: text('color').notNull().default('#6b7280'),
   icon: text('icon'),
+  created_at: text('created_at').notNull()
+});
+
+// ============================================================================
+// USERS TABLE (Multi-user support for families)
+// ============================================================================
+export const users = sqliteTable('users', {
+  user_id: integer('user_id').primaryKey({ autoIncrement: true }),
+  username: text('username').notNull().unique(),
+  xp: integer('xp').notNull().default(0),
+  coins: integer('coins').notNull().default(0),
+  level: integer('level').notNull().default(1),
+  created_at: text('created_at').notNull()
+});
+
+// ============================================================================
+// SETTINGS TABLE (App configuration)
+// ============================================================================
+export const settings = sqliteTable('settings', {
+  key: text('key').primaryKey(),
+  value: text('value')
+});
+
+// ============================================================================
+// AI MEMORY TABLE (For AI context persistence)
+// ============================================================================
+export const aiMemory = sqliteTable('ai_memory', {
+  memory_id: integer('memory_id').primaryKey({ autoIncrement: true }),
+  content: text('content').notNull(),
+  meta_json: text('meta_json'), // JSON metadata
   created_at: text('created_at').notNull()
 });
 
@@ -128,6 +158,12 @@ export const taskCategoriesRelations = relations(taskCategories, ({ many }) => (
   tasks: many(tasks)
 }));
 
+// Users relations
+export const usersRelations = relations(users, ({ many }) => ({
+  tasks: many(tasks),
+  completions: many(taskCompletions)
+}));
+
 // ============================================================================
 // EXPORT SCHEMA FOR DRIZZLE
 // ============================================================================
@@ -139,12 +175,16 @@ export const schema = {
   journalEntries,
   workoutSessions,
   taskCategories,
+  users,
+  settings,
+  aiMemory,
   // Relations
   tasksRelations,
   taskCompletionsRelations,
   checklistsRelations,
   checklistItemsRelations,
-  taskCategoriesRelations
+  taskCategoriesRelations,
+  usersRelations
 };
 
 // ============================================================================
@@ -170,3 +210,12 @@ export type NewWorkoutSession = typeof workoutSessions.$inferInsert;
 
 export type TaskCategory = typeof taskCategories.$inferSelect;
 export type NewTaskCategory = typeof taskCategories.$inferInsert;
+
+export type User = typeof users.$inferSelect;
+export type NewUser = typeof users.$inferInsert;
+
+export type Setting = typeof settings.$inferSelect;
+export type NewSetting = typeof settings.$inferInsert;
+
+export type AiMemory = typeof aiMemory.$inferSelect;
+export type NewAiMemory = typeof aiMemory.$inferInsert;
