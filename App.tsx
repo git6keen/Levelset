@@ -1,4 +1,4 @@
-// FILE: App.tsx - Modern React app with Tanstack Query
+// FILE: App.tsx - Fixed with Calendar and Planner routes
 import React from "react";
 import { Routes, Route, Navigate, NavLink, Outlet } from "react-router-dom";
 import { QueryClientProvider } from '@tanstack/react-query';
@@ -8,6 +8,8 @@ import { queryClient } from './query-client.js';
 import TopNav from "./TopNav";
 import Dashboard from "./Dashboard";
 import TasksPage from "./TasksPage";
+import CalendarPage from "./CalendarPage";
+import DailyPlannerPage from "./DailyPlannerPage";
 import GoalsPage from "./GoalsPage";
 import ChecklistsPage from "./ChecklistsPage";
 import JournalPage from "./JournalPage";
@@ -29,6 +31,8 @@ export default function App() {
           <Route path="/tasks" element={<TasksLayout />}>
             <Route index element={<Navigate to="list" replace />} />
             <Route path="list" element={<TasksPage />} />
+            <Route path="calendar" element={<CalendarPage />} />
+            <Route path="planner" element={<DailyPlannerPage />} />
             <Route path="goals" element={<GoalsPage />} />
           </Route>
 
@@ -54,7 +58,7 @@ export default function App() {
   );
 }
 
-/** Local sub-layout for the Tasks area with a small tab bar */
+/** TasksLayout with Calendar and Planner tabs */
 function TasksLayout() {
   const link = ({ isActive }: { isActive: boolean }) => "tab" + (isActive ? " active" : "");
   return (
@@ -63,6 +67,8 @@ function TasksLayout() {
         <div className="topbar-inner" style={{ gap: 8 }}>
           <nav className="tabs">
             <NavLink to="/tasks/list" className={link}>Tasks</NavLink>
+            <NavLink to="/tasks/calendar" className={link}>Calendar</NavLink>
+            <NavLink to="/tasks/planner" className={link}>Planner</NavLink>
             <NavLink to="/tasks/goals" className={link}>Goals</NavLink>
           </nav>
         </div>
